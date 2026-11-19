@@ -30,6 +30,7 @@ import {
   BerkasChecklistItem,
   ItemRiwayatKLK,
   RiwayatVersiFormKLK,
+  PembimbingLapanganStaff,
   isMahasiswaRole
 } from '../types/sikma';
 import { INITIAL_SEMESTER_LIST } from '../data/semesterList';
@@ -864,6 +865,13 @@ export const checkIsDosenPembimbingKlkOnly = (
     return false;
   }
 
+  if (
+    klkItem.assignedDosenUid &&
+    (user.id === klkItem.assignedDosenUid || (user as unknown as { ownerUid?: string }).ownerUid === klkItem.assignedDosenUid)
+  ) {
+    return true;
+  }
+
   const normalizeName = (s: string) =>
     s
       .toLowerCase()
@@ -954,6 +962,20 @@ export const checkIsDosenPAForStudent = (
   const activeDosenNama = hasCustomAssignedDosen
     ? klkItem.dosenPembimbingKLK!
     : (klkItem.dpaNama || student?.dosenPANama || '');
+
+  const userOwnerUid = (user as unknown as { ownerUid?: string }).ownerUid;
+  if (hasCustomAssignedDosen) {
+    if (klkItem.assignedDosenUid && (user.id === klkItem.assignedDosenUid || (userOwnerUid && userOwnerUid === klkItem.assignedDosenUid))) {
+      return true;
+    }
+  } else {
+    if (
+      (klkItem.assignedDpaUid && (user.id === klkItem.assignedDpaUid || (userOwnerUid && userOwnerUid === klkItem.assignedDpaUid))) ||
+      (klkItem.assignedDosenUid && (user.id === klkItem.assignedDosenUid || (userOwnerUid && userOwnerUid === klkItem.assignedDosenUid)))
+    ) {
+      return true;
+    }
+  }
 
   if (!activeDosenNama) return false;
 
@@ -3172,6 +3194,7 @@ interface KlkViewProps {
   student: Mahasiswa;
   mahasiswaList?: Mahasiswa[];
   dosenList: Dosen[];
+  pembimbingLapanganList?: PembimbingLapanganStaff[];
   klkList: PengajuanKLK[];
   mitraList: MitraIndustriKLK[];
   dokumenList: DokumenPanduanKLK[];
@@ -3212,6 +3235,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
   student,
   mahasiswaList = [],
   dosenList,
+  pembimbingLapanganList = [],
   klkList,
   mitraList,
   dokumenList,
@@ -3425,6 +3449,14 @@ export const KlkView: React.FC<KlkViewProps> = ({
 
       const matched = klkList.filter((item) => {
         if (!item) return false;
+        const userOwnerUid = (effectiveUser as unknown as { ownerUid?: string } | null)?.ownerUid;
+        if (
+          item.pembimbingLapanganUid &&
+          ((effectiveUser?.id && item.pembimbingLapanganUid === effectiveUser.id) ||
+            (userOwnerUid && item.pembimbingLapanganUid === userOwnerUid))
+        ) {
+          return true;
+        }
         const kMentor = (item.mentorIndustri || '').toLowerCase().trim();
         const kEmail = (item.emailMentor || item.kontakMentor || '').toLowerCase().trim();
         const kMitra = (item.namaMitra || '').toLowerCase().trim();
@@ -17844,11 +17876,35 @@ ${instansiMitra}
                 </label>
                 <input
                   type="text"
+                  list="datalist-pembimbing-lapangan"
                   value={formMentor}
-                  onChange={(e) => setFormMentor(e.target.value)}
+                  onChange={(e) => {
+                    const nextVal = e.target.value;
+                    setFormMentor(nextVal);
+                    const matchedPbl = pembimbingLapanganList.find(
+                      (p) => p.nama && p.nama.trim().toLowerCase() === nextVal.trim().toLowerCase()
+                    );
+                    if (matchedPbl) {
+                      if (!formMitra.trim() && matchedPbl.namaMitra) setFormMitra(matchedPbl.namaMitra);
+                      if (!formAlamatMitra.trim() && matchedPbl.alamatInstansi) setFormAlamatMitra(matchedPbl.alamatInstansi);
+                      if (matchedPbl.telepon) setFormHpPembimbing(matchedPbl.telepon);
+                      if (matchedPbl.email) setFormEmailPembimbing(matchedPbl.email);
+                      const kontakParts = [matchedPbl.telepon || '', matchedPbl.email || matchedPbl.username || '']
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+                      if (kontakParts.length > 0) setFormKontakMentor(kontakParts.join(' / '));
+                    }
+                  }}
                   placeholder="Nama & Jabatan Pembimbing Lapangan Mitra"
                   className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002B49] text-xs"
                 />
+                <datalist id="datalist-pembimbing-lapangan">
+                  {pembimbingLapanganList.map((p) => (
+                    <option key={p.id} value={p.nama}>
+                      {p.namaMitra ? `${p.nama} - ${p.namaMitra}` : p.nama}
+                    </option>
+                  ))}
+                </datalist>
               </div>
 
               {/* Kontak Pembimbing Lapangan (2 Bagian Terpisah: No HP dan Nama Email) */}
@@ -23000,12 +23056,20 @@ ${instansiMitra}
                       </label>
                       <input
                         type="text"
+                        list="datalist-pembimbing-lapangan-edit"
                         required
                         value={editKlkForm.mentorIndustri}
                         onChange={(e) => setEditKlkForm({ ...editKlkForm, mentorIndustri: e.target.value })}
                         placeholder="Contoh: Dr. Ir. Budi Santoso, M.T."
                         className="w-full p-2 border border-slate-300 rounded-lg text-xs font-semibold focus:ring-2 focus:ring-[#002B49]"
                       />
+                      <datalist id="datalist-pembimbing-lapangan-edit">
+                        {pembimbingLapanganList.map((p) => (
+                          <option key={p.id} value={p.nama}>
+                            {p.namaMitra ? `${p.nama} - ${p.namaMitra}` : p.nama}
+                          </option>
+                        ))}
+                      </datalist>
                     </div>
 
                     <div>

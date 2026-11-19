@@ -491,7 +491,18 @@ export function subscribeSikmaCollections(
         snap.forEach((docSnap) => {
           const raw = docSnap.data();
           if (raw && raw.data && typeof raw.data === 'object') {
-            const item = { ...(raw.data as PengajuanKLK), id: (raw.data as PengajuanKLK).id || docSnap.id };
+            const rawData = raw.data as PengajuanKLK;
+            const item: PengajuanKLK = {
+              ...rawData,
+              id: rawData.id || docSnap.id,
+              ownerUid: clampStr(raw.ownerUid || rawData.ownerUid || '', 128) || undefined,
+              assignedDosenUid: clampStr(raw.assignedDosenUid ?? rawData.assignedDosenUid ?? '', 128) || undefined,
+              assignedDpaUid: clampStr(raw.assignedDpaUid ?? rawData.assignedDpaUid ?? '', 128) || undefined,
+              pembimbingLapanganUid: clampStr(raw.pembimbingLapanganUid ?? rawData.pembimbingLapanganUid ?? '', 128) || undefined,
+              skema: (raw.skema as PengajuanKLK['skema']) || rawData.skema,
+              namaMitra: rawData.namaMitra || (raw.instansiNama as string) || '',
+              status: (raw.status as PengajuanKLK['status']) || rawData.status
+            };
             primaryKlkMap.set(docSnap.id, { ownerUid: raw.ownerUid as string, item });
           }
         });
@@ -511,7 +522,18 @@ export function subscribeSikmaCollections(
           snap.forEach((docSnap) => {
             const raw = docSnap.data();
             if (raw && raw.data && typeof raw.data === 'object') {
-              const item = { ...(raw.data as PengajuanKLK), id: (raw.data as PengajuanKLK).id || docSnap.id };
+              const rawData = raw.data as PengajuanKLK;
+              const item: PengajuanKLK = {
+                ...rawData,
+                id: rawData.id || docSnap.id,
+                ownerUid: clampStr(raw.ownerUid || rawData.ownerUid || '', 128) || undefined,
+                assignedDosenUid: clampStr(raw.assignedDosenUid ?? rawData.assignedDosenUid ?? '', 128) || undefined,
+                assignedDpaUid: clampStr(raw.assignedDpaUid ?? rawData.assignedDpaUid ?? '', 128) || undefined,
+                pembimbingLapanganUid: clampStr(raw.pembimbingLapanganUid ?? rawData.pembimbingLapanganUid ?? '', 128) || undefined,
+                skema: (raw.skema as PengajuanKLK['skema']) || rawData.skema,
+                namaMitra: rawData.namaMitra || (raw.instansiNama as string) || '',
+                status: (raw.status as PengajuanKLK['status']) || rawData.status
+              };
               dpaKlkMap.set(docSnap.id, { ownerUid: raw.ownerUid as string, item });
             }
           });
@@ -855,11 +877,186 @@ export function subscribeSikmaCollections(
   };
 }
 
+const AUTH_UID_REGEX = /^[A-Za-z0-9]{20,}$/;
+const SDM_UID_PREFIX_REGEX = /^(?:dos|mhs|adm|plp|pbl)-([A-Za-z0-9]{20,})$/;
+
+const normalizeTitleFreeName = (val?: string): string =>
+  String(val || '')
+    .toLowerCase()
+    .replace(/\b(prof|dr|dra|drs|ir|s\.si|m\.si|m\.sc|m\.phil|ph\.d|s\.tp|m\.eng|m\.s|s\.t|m\.t|s\.pd|m\.pd|s\.ap|m\.ap|s\.kom|a\.md|s\.tr\.si|dr\.sc)\b\.?/gi, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const isSamePersonName = (a?: string, b?: string): boolean => {
+  const n1 = normalizeTitleFreeName(a);
+  const n2 = normalizeTitleFreeName(b);
+  if (!n1 || !n2) return false;
+  if (n1 === n2) return true;
+  if (n1.length >= 5 && n2.length >= 5 && (n1.includes(n2) || n2.includes(n1))) return true;
+  const t1 = n1.split(' ').filter((t) => t.length >= 3);
+  const t2 = n2.split(' ').filter((t) => t.length >= 3);
+  if (t1.length >= 2 && t2.length >= 2) {
+    const common = t1.filter((t) => t2.includes(t));
+    if (common.length >= 2) return true;
+  }
+  return false;
+};
+
+export function extractUidFromSdmOrUser(
+  entity?: { id?: string; userUid?: string; ownerUid?: string; nama?: string; email?: string; nip?: string; nidn?: string; nim?: string; idMitra?: string; username?: string } | null,
+  users: UserAccountItem[] = [],
+  allowedRoles?: UserRole[]
+): string {
+  if (!entity) return '';
+  if (typeof entity.userUid === 'string' && AUTH_UID_REGEX.test(entity.userUid.trim())) {
+    return entity.userUid.trim();
+  }
+  if (typeof entity.ownerUid === 'string' && AUTH_UID_REGEX.test(entity.ownerUid.trim())) {
+    return entity.ownerUid.trim();
+  }
+  if (typeof entity.id === 'string') {
+    const idTrim = entity.id.trim();
+    const prefMatch = idTrim.match(SDM_UID_PREFIX_REGEX);
+    if (prefMatch) return prefMatch[1];
+    if (AUTH_UID_REGEX.test(idTrim)) return idTrim;
+  }
+
+  if (users.length > 0) {
+    const eEmail = String(entity.email || '').trim().toLowerCase();
+    const eNum = String(entity.nip || entity.nidn || entity.nim || entity.idMitra || '').replace(/\D/g, '');
+    const eUser = String(entity.username || '').trim().toLowerCase();
+    const matchedUser = users.find((u) => {
+      if (allowedRoles && !allowedRoles.includes(u.role)) return false;
+      if (eEmail && u.email && u.email.trim().toLowerCase() === eEmail) return true;
+      const uNum = String(u.identifier || '').replace(/\D/g, '');
+      if (eNum && uNum && eNum.length >= 5 && eNum === uNum) return true;
+      if (eUser && u.username && u.username.trim().toLowerCase() === eUser) return true;
+      if (entity.nama && u.nama && isSamePersonName(entity.nama, u.nama)) return true;
+      return false;
+    });
+    if (matchedUser) {
+      if (matchedUser.ownerUid && AUTH_UID_REGEX.test(matchedUser.ownerUid)) return matchedUser.ownerUid;
+      if (AUTH_UID_REGEX.test(matchedUser.id)) return matchedUser.id;
+    }
+  }
+  return '';
+}
+
+export function enrichKlkUids(
+  item: PengajuanKLK,
+  ctx: {
+    dosenList?: Dosen[];
+    pembimbingLapanganList?: PembimbingLapanganStaff[];
+    mahasiswaList?: Mahasiswa[];
+    userList?: UserAccountItem[];
+  }
+): PengajuanKLK {
+  const { dosenList = [], pembimbingLapanganList = [], mahasiswaList = [], userList = [] } = ctx;
+  const studentMhs = mahasiswaList.find(
+    (m) =>
+      m.id === item.mahasiswaId ||
+      (item.nim && m.nim && m.nim.replace(/\D/g, '') === item.nim.replace(/\D/g, '')) ||
+      (item.mahasiswaNama && isSamePersonName(m.nama, item.mahasiswaNama))
+  );
+
+  let assignedDpaUid = item.assignedDpaUid || '';
+  let assignedDosenUid = item.assignedDosenUid || '';
+  let pembimbingLapanganUid = item.pembimbingLapanganUid || '';
+
+  // 1. Resolve DPA UID
+  const effectiveDpaId = item.dpaId || studentMhs?.dosenPAId || '';
+  const effectiveDpaNama = item.dpaNama || studentMhs?.dosenPANama || '';
+  const effectiveDpaNip = studentMhs?.dosenPANip || '';
+  if (effectiveDpaId || effectiveDpaNama || effectiveDpaNip) {
+    const matchedDpa = dosenList.find(
+      (d) =>
+        (effectiveDpaId && (d.id === effectiveDpaId || d.id === `dos-${effectiveDpaId}` || extractUidFromSdmOrUser(d) === effectiveDpaId)) ||
+        (effectiveDpaNip && (d.nip || d.nidn || '').replace(/\D/g, '') === effectiveDpaNip.replace(/\D/g, '') && effectiveDpaNip.replace(/\D/g, '').length >= 5) ||
+        (effectiveDpaNama && isSamePersonName(d.nama, effectiveDpaNama))
+    );
+    const resolvedDpa =
+      extractUidFromSdmOrUser(matchedDpa, userList, ['dosen']) ||
+      extractUidFromSdmOrUser({ id: effectiveDpaId, nama: effectiveDpaNama, nip: effectiveDpaNip }, userList, ['dosen']);
+    if (resolvedDpa) {
+      assignedDpaUid = resolvedDpa;
+    }
+  }
+
+  // 2. Resolve Dosen Pembimbing KLK UID (ketika ditetapkan oleh Admin atau tersedia)
+  const dosenKlkNama = (item.dosenPembimbingKLK || '').trim();
+  if (dosenKlkNama && !dosenKlkNama.includes('Belum Ditetapkan')) {
+    const matchedDosen = dosenList.find((d) => isSamePersonName(d.nama, dosenKlkNama));
+    const resolvedDosen =
+      extractUidFromSdmOrUser(matchedDosen, userList, ['dosen']) ||
+      extractUidFromSdmOrUser({ nama: dosenKlkNama }, userList, ['dosen']);
+    if (resolvedDosen) {
+      assignedDosenUid = resolvedDosen;
+    }
+  }
+
+  // 3. Resolve Pembimbing Lapangan / Eksternal UID
+  const mentorName = (item.mentorIndustri || '').trim();
+  const mentorEmail = (item.emailMentor || '').trim().toLowerCase();
+  const mentorKontak = (item.kontakMentor || '').trim().toLowerCase();
+  const mitraName = (item.namaMitra || '').trim().toLowerCase();
+
+  const matchedPbl = pembimbingLapanganList.find((p) => {
+    const pEmail = (p.email || '').trim().toLowerCase();
+    const pUsername = (p.username || '').trim().toLowerCase();
+    const pIdMitra = (p.idMitra || '').trim().toLowerCase();
+    if (mentorEmail && pEmail && mentorEmail === pEmail) return true;
+    if (mentorEmail && pUsername && mentorEmail === pUsername) return true;
+    if (mentorKontak && pEmail && mentorKontak.includes(pEmail)) return true;
+    if (mentorKontak && pUsername && pUsername.length >= 4 && mentorKontak.includes(pUsername)) return true;
+    if (mentorKontak && pIdMitra && pIdMitra.length >= 4 && mentorKontak.includes(pIdMitra)) return true;
+    if (mentorName && p.nama && isSamePersonName(p.nama, mentorName)) return true;
+    return false;
+  });
+
+  let resolvedPbl = extractUidFromSdmOrUser(matchedPbl, userList, ['eksternal']);
+  if (!resolvedPbl && userList.length > 0) {
+    const eksternalUser = userList.find((u) => {
+      if (u.role !== 'eksternal') return false;
+      const uEmail = (u.email || '').trim().toLowerCase();
+      const uUser = (u.username || '').trim().toLowerCase();
+      const uId = (u.identifier || '').trim().toLowerCase();
+      if (mentorEmail && uEmail && mentorEmail === uEmail) return true;
+      if (mentorEmail && (uUser === mentorEmail || uId === mentorEmail)) return true;
+      if (mentorKontak && uEmail && mentorKontak.includes(uEmail)) return true;
+      if (mentorKontak && uUser && uUser.length >= 4 && mentorKontak.includes(uUser)) return true;
+      if (mentorKontak && uId && uId.length >= 4 && mentorKontak.includes(uId)) return true;
+      if (mentorName && u.nama && isSamePersonName(u.nama, mentorName)) return true;
+      return false;
+    });
+    resolvedPbl = extractUidFromSdmOrUser(eksternalUser, userList, ['eksternal']);
+  }
+  if (!resolvedPbl && mitraName) {
+    const mitraCandidates = pembimbingLapanganList.filter(
+      (p) => p.namaMitra && (p.namaMitra.trim().toLowerCase() === mitraName || p.namaMitra.trim().toLowerCase().includes(mitraName))
+    );
+    if (mitraCandidates.length === 1) {
+      resolvedPbl = extractUidFromSdmOrUser(mitraCandidates[0], userList, ['eksternal']);
+    }
+  }
+  if (resolvedPbl) {
+    pembimbingLapanganUid = resolvedPbl;
+  }
+
+  return {
+    ...item,
+    ...(assignedDpaUid ? { assignedDpaUid } : {}),
+    ...(assignedDosenUid ? { assignedDosenUid } : {}),
+    ...(pembimbingLapanganUid ? { pembimbingLapanganUid } : {})
+  };
+}
+
 export async function syncKlkListToFirestore(
   items: PengajuanKLK[],
   firebaseUser: FirebaseUser,
   meta: RemoteSyncMeta,
-  allowDeletes = false
+  allowDeletes = false,
+  isAdmin = allowDeletes
 ): Promise<void> {
   const colName = 'klk_submissions';
   const uid = sanitizeDocId(firebaseUser.uid, 'usr');
@@ -881,9 +1078,9 @@ export async function syncKlkListToFirestore(
 
     const docRef = doc(db, colName, docId);
     const baseFields = {
-      assignedDosenUid: clampStr((item as unknown as Record<string, unknown>).assignedDosenUid || '', 128),
-      assignedDpaUid: clampStr((item as unknown as Record<string, unknown>).assignedDpaUid || '', 128),
-      pembimbingLapanganUid: clampStr((item as unknown as Record<string, unknown>).pembimbingLapanganUid || '', 128),
+      assignedDosenUid: clampStr(item.assignedDosenUid || '', 128),
+      assignedDpaUid: clampStr(item.assignedDpaUid || '', 128),
+      pembimbingLapanganUid: clampStr(item.pembimbingLapanganUid || '', 128),
       mahasiswaId: clampStr(item.mahasiswaId || '', 128),
       mahasiswaNama: clampStr(item.mahasiswaNama || 'Mahasiswa', 200) || 'Mahasiswa',
       nim: clampStr(item.nim || '-', 60) || '-',
@@ -893,20 +1090,43 @@ export async function syncKlkListToFirestore(
       data: cleanData as unknown as Record<string, unknown>
     };
 
+    const buildNonAdminUpdate = (existingOwnerUid?: string) => {
+      const effectiveOwner = existingOwnerUid || ownerMap[docId] || item.ownerUid || '';
+      if (effectiveOwner === uid) {
+        return {
+          skema: baseFields.skema,
+          instansiNama: baseFields.instansiNama,
+          status: baseFields.status,
+          data: baseFields.data,
+          updatedAt: serverTimestamp()
+        };
+      }
+      return {
+        status: baseFields.status,
+        data: baseFields.data,
+        updatedAt: serverTimestamp()
+      };
+    };
+
     try {
       if (known.has(docId)) {
-        await updateDoc(docRef, {
-          ...baseFields,
-          updatedAt: serverTimestamp()
-        });
+        await updateDoc(
+          docRef,
+          isAdmin
+            ? { ...baseFields, updatedAt: serverTimestamp() }
+            : buildNonAdminUpdate()
+        );
       } else {
         const snap = await getDoc(docRef);
         if (meta.syncVersions[colName] !== myVersion) return;
         if (snap.exists()) {
-          await updateDoc(docRef, {
-            ...baseFields,
-            updatedAt: serverTimestamp()
-          });
+          const existingOwnerUid = typeof snap.data()?.ownerUid === 'string' ? (snap.data().ownerUid as string) : undefined;
+          await updateDoc(
+            docRef,
+            isAdmin
+              ? { ...baseFields, updatedAt: serverTimestamp() }
+              : buildNonAdminUpdate(existingOwnerUid)
+          );
         } else {
           await setDoc(docRef, {
             id: docId,
@@ -1165,7 +1385,8 @@ export async function syncLogbooksToFirestore(
   items: LogbookLabItem[],
   firebaseUser: FirebaseUser,
   meta: RemoteSyncMeta,
-  allowDeletes = false
+  allowDeletes = false,
+  isAdmin = allowDeletes
 ): Promise<void> {
   const colName = 'logbooks';
   const uid = sanitizeDocId(firebaseUser.uid, 'usr');
@@ -1190,15 +1411,20 @@ export async function syncLogbooksToFirestore(
       status: clampStr(item.statusVerifikasi || 'Menunggu Verifikasi', 60) || 'Menunggu Verifikasi',
       data: cleanData as unknown as Record<string, unknown>
     };
+    const nonAdminUpdate = {
+      status: payload.status,
+      data: payload.data,
+      updatedAt: serverTimestamp()
+    };
     const docRef = doc(db, colName, docId);
     try {
       if (known.has(docId)) {
-        await updateDoc(docRef, { ...payload, updatedAt: serverTimestamp() });
+        await updateDoc(docRef, isAdmin ? { ...payload, updatedAt: serverTimestamp() } : nonAdminUpdate);
       } else {
         const snap = await getDoc(docRef);
         if (meta.syncVersions[colName] !== myVersion) return;
         if (snap.exists()) {
-          await updateDoc(docRef, { ...payload, updatedAt: serverTimestamp() });
+          await updateDoc(docRef, isAdmin ? { ...payload, updatedAt: serverTimestamp() } : nonAdminUpdate);
         } else {
           await setDoc(docRef, {
             id: docId,

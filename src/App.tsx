@@ -10,6 +10,7 @@ import {
   createEmptyRemoteSyncMeta,
   subscribeSikmaCollections,
   syncKlkListToFirestore,
+  enrichKlkUids,
   syncUsersListToFirestore,
   syncSdmCategoryToFirestore,
   syncLogbooksToFirestore,
@@ -610,13 +611,17 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
   useEffect(() => {
     if (!isAuthReady || !firebaseUser || !currentUser || remoteApplyDepthRef.current > 0) return;
     if (!remoteMetaRef.current.readyCollections.has('klk_submissions')) return;
+    const enrichedKlkList = klkList.map((item) =>
+      enrichKlkUids(item, { dosenList, pembimbingLapanganList, mahasiswaList, userList })
+    );
     void syncKlkListToFirestore(
-      klkList,
+      enrichedKlkList,
       firebaseUser,
       remoteMetaRef.current,
+      isAdminUser,
       isAdminUser
     ).catch((err) => console.error('Sync KLK error:', err));
-  }, [klkList, isAuthReady, firebaseUser, currentUser, currentRole]);
+  }, [klkList, dosenList, pembimbingLapanganList, mahasiswaList, userList, isAuthReady, firebaseUser, currentUser, currentRole]);
 
   useEffect(() => {
     if (!isAuthReady || !firebaseUser || !currentUser || remoteApplyDepthRef.current > 0) return;
@@ -852,7 +857,12 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
           updated.dosenPembimbingKLK = fullDosenNama;
         }
       }
-      return updated;
+      return enrichKlkUids(updated, {
+        dosenList: activeDosen,
+        pembimbingLapanganList: activePembimbing,
+        mahasiswaList: syncedMahasiswa,
+        userList: activeUsers
+      });
     });
 
     // 3. Update student state jika profil mahasiswa aktif berubah atau terhapus
@@ -1264,26 +1274,38 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
 
   // Handlers for KLK
   const handleAddKLK = (newKLK: PengajuanKLK) => {
+    const enrichedNewKlk = enrichKlkUids(newKLK, {
+      dosenList,
+      pembimbingLapanganList,
+      mahasiswaList,
+      userList
+    });
     setKlkList((prev) => {
-      const cleanNim = (newKLK.nim || '').replace(/\D/g, '');
+      const cleanNim = (enrichedNewKlk.nim || '').replace(/\D/g, '');
       const isDuplicate = prev.some(
         (k) =>
-          k.id === newKLK.id ||
+          k.id === enrichedNewKlk.id ||
           (cleanNim &&
             (k.nim || '').replace(/\D/g, '') === cleanNim &&
-            k.waktuSubmit === newKLK.waktuSubmit &&
-            k.namaMitra === newKLK.namaMitra)
+            k.waktuSubmit === enrichedNewKlk.waktuSubmit &&
+            k.namaMitra === enrichedNewKlk.namaMitra)
       );
       if (isDuplicate) {
         return prev;
       }
-      return [newKLK, ...prev];
+      return [enrichedNewKlk, ...prev];
     });
   };
 
   const handleUpdateKLK = (updatedKlk: PengajuanKLK) => {
+    const enrichedUpdated = enrichKlkUids(updatedKlk, {
+      dosenList,
+      pembimbingLapanganList,
+      mahasiswaList,
+      userList
+    });
     setKlkList((prev) =>
-      prev.map((k) => (k.id === updatedKlk.id ? updatedKlk : k))
+      prev.map((k) => (k.id === enrichedUpdated.id ? enrichedUpdated : k))
     );
   };
 
@@ -1542,7 +1564,14 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
           isNameMatch(m.nama, currentUser.nama) ||
           (currentUser.username && isNameMatch(m.nama, currentUser.username))
       );
-      if (matchedMhs && (student.id !== matchedMhs.id || student.nim !== matchedMhs.nim || student.nama !== matchedMhs.nama)) {
+      if (
+        matchedMhs &&
+        (student.id !== matchedMhs.id ||
+          student.nim !== matchedMhs.nim ||
+          student.nama !== matchedMhs.nama ||
+          student.dosenPANama !== matchedMhs.dosenPANama ||
+          student.dosenPAId !== matchedMhs.dosenPAId)
+      ) {
         setStudent(matchedMhs);
         try {
           localStorage.setItem('sikma_student_data', JSON.stringify(matchedMhs));
@@ -1554,7 +1583,10 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
   const handleLogout = () => {
     setCurrentUser(null);
     setPasswordReminderNotice(null);
+    setKlkList([]);
     localStorage.removeItem('sikma_auth_user');
+    localStorage.removeItem('sikma_klk_data');
+    localStorage.removeItem('sikma_student_data');
     void signOut(auth).catch(() => {});
     try {
       sessionStorage.removeItem('sikma_klk_form_submitted_id');
@@ -2091,6 +2123,7 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
               student={student}
               mahasiswaList={mahasiswaList}
               dosenList={dosenList}
+              pembimbingLapanganList={pembimbingLapanganList}
               klkList={klkList}
               mitraList={DAFTAR_MITRA_KLK}
               dokumenList={DOKUMEN_KLK_LIST}

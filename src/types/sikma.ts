@@ -512,6 +512,10 @@ export interface PengajuanKLK {
       kriteria?: Record<string, boolean>;
     }
   >;
+  ownerUid?: string;
+  assignedDosenUid?: string;
+  assignedDpaUid?: string;
+  pembimbingLapanganUid?: string;
 }
 
 export interface RiwayatVersiFormKLK {
@@ -643,6 +647,7 @@ export interface PembimbingLapanganStaff {
   jumlahMahasiswaBimbingan?: number;
   alamatInstansi?: string;
   username?: string;
+  userUid?: string;
 }
 
 export interface LabTeamMember {
