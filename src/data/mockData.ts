@@ -1,0 +1,718 @@
+import {
+  Dosen,
+  Mahasiswa,
+  MataKuliah,
+  NilaiKHS,
+  LogbookLabItem,
+  JadwalSeminar,
+  SuratPengajuan,
+  Pengumuman,
+  PengajuanKLK,
+  MitraIndustriKLK,
+  DokumenPanduanKLK
+} from '../types/sikma';
+
+export const INITIAL_DOSEN: Dosen[] = [
+  {
+    id: 'dos-1',
+    nip: '196403211989032001',
+    nidn: '0021036401',
+    nama: 'Dr. Dra. Hermin Sulistyarti',
+    gelar: 'M.Si',
+    bidang: 'Kimia Analitik',
+    lab: 'Laboratorium Kimia Analitik & Instrumentasi',
+    email: 'hermin_s@ub.ac.id',
+    jabatanAkademik: 'Lektor Kepala',
+    status: 'Aktif Mengajar',
+    kuotaBimbingan: 8,
+    jumlahBimbingan: 6,
+    matakuliah: ['Kimia Analitik Terapan', 'Metode Pemisahan Kimia', 'Spektrofotometri Lanjut', 'Kapita Selekta Kimia Analitik'],
+    topikRiset: ['Flow Injection Analysis (FIA)', 'Sensor Kimia & Biosensor', 'Pengembangan Spektrofotometri Ramah Lingkungan', 'Analisis Kontaminan Pangan'],
+    ruangKantor: 'Gedung Kimia Lt. 3 R.304',
+    telepon: '0341-575838 ext 304'
+  },
+  {
+    id: 'dos-2',
+    nip: '197008121997021001',
+    nidn: '0012087002',
+    nama: 'Masruri',
+    gelar: 'S.Si., M.Si., Ph.D',
+    bidang: 'Kimia Organik',
+    lab: 'Laboratorium Kimia Organik & Bahan Alam',
+    email: 'masruri@ub.ac.id',
+    jabatanAkademik: 'Guru Besar (Profesor)',
+    status: 'Aktif Mengajar',
+    kuotaBimbingan: 10,
+    jumlahBimbingan: 8,
+    matakuliah: ['Sintesis Organik', 'Elusidasi Struktur Senyawa Organik', 'Kimia Bahan Alam Laut', 'Kimia Hijau (Green Chemistry)'],
+    topikRiset: ['Isolasi Senyawa Bioaktif Minyak Atsiri', 'Sintesis Senyawa Antikanker Turunan Terpenoid', 'Biomassa dan Nanomaterial Karbon', 'Katalisis Heterogen Organik'],
+    ruangKantor: 'Gedung Kimia Lt. 2 R.202',
+    telepon: '0341-575838 ext 202'
+  },
+  {
+    id: 'dos-3',
+    nip: '197705152003122002',
+    nidn: '0015057701',
+    nama: 'Dr. Anna Safitri',
+    gelar: 'M.Sc., Ph.D',
+    bidang: 'Biokimia',
+    lab: 'Laboratorium Biokimia & Enzim',
+    email: 'a.safitri@ub.ac.id',
+    jabatanAkademik: 'Lektor Kepala',
+    status: 'Aktif Mengajar',
+    kuotaBimbingan: 8,
+    jumlahBimbingan: 5,
+    matakuliah: ['Biokimia Nutrisi & Enzim', 'Teknologi DNA Rekombinan', 'Bioenergetika Molekuler', 'Praktikum Biokimia'],
+    topikRiset: ['Imobilisasi Enzim Lipase', 'Inhibitor Alpha-Glukosidase untuk Antidiabetes', 'Peptida Bioaktif dari Ekstrak Tanaman Herbal', 'Biosintesis Nanopartikel'],
+    ruangKantor: 'Gedung Kimia Lt. 3 R.310',
+    telepon: '0341-575838 ext 310'
+  },
+  {
+    id: 'dos-4',
+    nip: '196809241994031002',
+    nidn: '0024096803',
+    nama: 'Dr. rer. nat. Rachmat Triandi Tjahjanto',
+    gelar: 'S.Si., M.Sc',
+    bidang: 'Kimia Fisik',
+    lab: 'Laboratorium Kimia Fisik & Elektrokimia',
+    email: 'rachmat_tt@ub.ac.id',
+    jabatanAkademik: 'Lektor Kepala',
+    status: 'Aktif Mengajar',
+    kuotaBimbingan: 8,
+    jumlahBimbingan: 4,
+    matakuliah: ['Termodinamika Kimia', 'Kinetika Kimia & Katalis', 'Kimia Komputasi', 'Elektrokimia Terapan'],
+    topikRiset: ['Elektrokatalisis untuk Sel Bahan Bakar (Fuel Cell)', 'Modeling Molekuler DFT Kompleks Logam', 'Superkapasitor Berbasis Karbon Aktif', 'Kinetika Reaksi Fotodegradasi'],
+    ruangKantor: 'Gedung Kimia Lt. 2 R.208',
+    telepon: '0341-575838 ext 208'
+  },
+  {
+    id: 'dos-5',
+    nip: '197506192000032001',
+    nidn: '0019067501',
+    nama: 'Dr. Dra. Sri Wardhani',
+    gelar: 'M.Si',
+    bidang: 'Kimia Anorganik',
+    lab: 'Laboratorium Kimia Anorganik & Material',
+    email: 'sri_wardhani@ub.ac.id',
+    jabatanAkademik: 'Lektor Kepala',
+    status: 'Aktif Mengajar',
+    kuotaBimbingan: 8,
+    jumlahBimbingan: 7,
+    matakuliah: ['Kimia Koordinasi', 'Kimia Material Anorganik', 'Sintesis Zeolit & Pilarisasi', 'Karakterisasi Material Padatan'],
+    topikRiset: ['Sintesis Material Fotokatalis TiO2/Zeolit', 'Adsorben Limbah Logam Berat Berbasis Lempung Alam', 'Nanokomposit Magnetik', 'Zeolit Sintesis dari Abu Terbang Batubara'],
+    ruangKantor: 'Gedung Kimia Lt. 2 R.214',
+    telepon: '0341-575838 ext 214'
+  },
+  {
+    id: 'dos-6',
+    nip: '198203112008121003',
+    nidn: '0011038202',
+    nama: 'Moh. Farid Rahman',
+    gelar: 'S.Si., M.Si',
+    bidang: 'Kimia Organik',
+    lab: 'Laboratorium Kimia Organik & Bahan Alam',
+    email: 'farid_chem@ub.ac.id',
+    jabatanAkademik: 'Lektor',
+    status: 'Aktif Mengajar',
+    kuotaBimbingan: 6,
+    jumlahBimbingan: 4,
+    matakuliah: ['Kimia Organik Fisik', 'Metode Sintesis Modern', 'Praktikum Kimia Organik II'],
+    topikRiset: ['Pemanfaatan Minyak Atsiri Nilam & Cengkeh', 'Katalis Asam Padat Ramah Lingkungan', 'Derivatisasi Bahan Alam Lokal Malang'],
+    ruangKantor: 'Gedung Kimia Lt. 2 R.203',
+    telepon: '0341-575838 ext 203'
+  },
+  {
+    id: 'dos-7',
+    nip: '197901042005012003',
+    nidn: '0004017902',
+    nama: 'Dr. Arie Srihardyastutie',
+    gelar: 'S.Si., M.Kes',
+    bidang: 'Biokimia',
+    lab: 'Laboratorium Biokimia & Enzim',
+    email: 'ariesri@ub.ac.id',
+    jabatanAkademik: 'Lektor Kepala',
+    status: 'Aktif Mengajar',
+    kuotaBimbingan: 8,
+    jumlahBimbingan: 6,
+    matakuliah: ['Biokimia Klinis & Toksikologi', 'Metabolisme Senyawa Organik', 'Biologi Molekuler'],
+    topikRiset: ['Senyawa Antiinflamasi dari Sumber Hayati', 'Biomarker Stres Oksidatif', 'Uji Sitotoksisitas Sel Kanker'],
+    ruangKantor: 'Gedung Kimia Lt. 3 R.312',
+    telepon: '0341-575838 ext 312'
+  },
+  {
+    id: 'dos-8',
+    nip: '198402182010122003',
+    nidn: '0018028401',
+    nama: 'Zubaidah Ningsih',
+    gelar: 'S.Si., M.Phil., Ph.D',
+    bidang: 'Kimia Fisik',
+    lab: 'Laboratorium Kimia Fisik & Elektrokimia',
+    email: 'zubaidah.n@ub.ac.id',
+    jabatanAkademik: 'Lektor',
+    status: 'Aktif Mengajar',
+    kuotaBimbingan: 6,
+    jumlahBimbingan: 3,
+    matakuliah: ['Kimia Koloid & Antarmuka', 'Termodinamika Statistika', 'Simulasi Dinamika Molekul'],
+    topikRiset: ['Surfaktan Alami Berbasis Minyak Nabati', 'Nanofluida untuk Transfer Kalor', 'Adsorpsi Polutan Organik pada Antarmuka Cair-Padat'],
+    ruangKantor: 'Gedung Kimia Lt. 2 R.209',
+    telepon: '0341-575838 ext 209'
+  },
+  {
+    id: 'dos-9',
+    nip: '197405102000031002',
+    nidn: '0010057402',
+    nama: 'Akhmad Sabarudin',
+    gelar: 'S.Si., M.Sc., Dr.Sc.',
+    bidang: 'Kimia Analitik',
+    lab: 'Laboratorium Kimia Analitik & Instrumentasi',
+    email: 'sabar@ub.ac.id',
+    jabatanAkademik: 'Guru Besar (Profesor)',
+    status: 'Aktif Mengajar',
+    kuotaBimbingan: 10,
+    jumlahBimbingan: 7,
+    matakuliah: ['Kromatografi Mikro & Kolom Monolitik', 'Sensor Kimia Mikrofluidik', 'Kimia Pemisahan Lanjut'],
+    topikRiset: ['Microfluidic Device & Lab-on-a-Chip', 'Pemisahan Ion Logam Berat', 'Monolithic Column Chromatography'],
+    ruangKantor: 'Gedung Kimia Lt. 2 R.201',
+    telepon: '0341-575838 ext 201'
+  },
+  {
+    id: 'dos-10',
+    nip: '196001011986011001',
+    nidn: '0001016001',
+    nama: 'Prof. Drs. Sutrisno',
+    gelar: 'M.Si., Ph.D.',
+    bidang: 'Kimia Organik',
+    lab: 'Laboratorium Kimia Organik & Bahan Alam',
+    email: 'sutrisno@ub.ac.id',
+    jabatanAkademik: 'Guru Besar (Profesor)',
+    status: 'Aktif Mengajar',
+    kuotaBimbingan: 10,
+    jumlahBimbingan: 8,
+    matakuliah: ['Kimia Polimer Alami', 'Stereokimia Organik', 'Transformasi Molekuler'],
+    topikRiset: ['Biopolimer & Hidrogel', 'Sintesis Senyawa Polifungsional', 'Pemanfaatan Biomassa Tropis'],
+    ruangKantor: 'Gedung Kimia Lt. 2 R.204',
+    telepon: '0341-575838 ext 204'
+  }
+];
+
+export const CURRENT_STUDENT: Mahasiswa = {
+  id: 'mhs-1',
+  nim: '215090200111012',
+  nama: 'Ahmad Rizky Pratama',
+  angkatan: '2021',
+  programStudi: 'S1 Kimia - FMIPA Universitas Brawijaya',
+  dosenPAId: 'dos-2',
+  dosenPANama: 'Masruri, S.Si., M.Si., Ph.D',
+  status: 'Aktif',
+  semester: 7,
+  ipk: 3.86,
+  totalSks: 123,
+  judulSkripsi: 'Isolasi dan Modifikasi Struktur Senyawa Eugenol dari Minyak Atsiri Cengkeh (Syzygium aromaticum) serta Uji Aktivitas Antibakteri terhadap Staphylococcus aureus',
+  dosenPembimbing1Id: 'dos-2',
+  dosenPembimbing1Nama: 'Masruri, S.Si., M.Si., Ph.D',
+  dosenPembimbing2Id: 'dos-1',
+  dosenPembimbing2Nama: 'Dr. Dra. Hermin Sulistyarti, M.Si',
+  tahapSkripsi: 'Penelitian Laboratorium',
+  labPenelitian: 'Laboratorium Kimia Organik & Bahan Alam'
+};
+
+export const MATA_KULIAH_KIMIA: MataKuliah[] = [
+  {
+    id: 'mk-1',
+    kode: 'MAK62505',
+    nama: 'Kimia Organik Bahan Alam',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Organik',
+    dosenPengampu: 'Masruri, S.Si., M.Si., Ph.D',
+    ruang: 'R. Kuliah Kimia 3.1 FMIPA',
+    jadwal: 'Senin, 07.30 - 10.00 WIB'
+  },
+  {
+    id: 'mk-2',
+    kode: 'MAK62204',
+    nama: 'Teknik Pemisahan Analitik & Kromatografi Lanjut',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Analitik',
+    dosenPengampu: 'Dr. Dra. Hermin Sulistyarti, M.Si',
+    ruang: 'R. Kuliah Kimia 2.2 FMIPA',
+    jadwal: 'Selasa, 10.15 - 12.45 WIB'
+  },
+  {
+    id: 'mk-3',
+    kode: 'MAK61504',
+    nama: 'Kimia Organik Medisinal & Desain Obat',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Organik',
+    dosenPengampu: 'Dr. Anna Safitri, M.Sc., Ph.D',
+    ruang: 'R. Kuliah Kimia 2.1 FMIPA',
+    jadwal: 'Kamis, 13.00 - 15.30 WIB'
+  },
+  {
+    id: 'mk-4',
+    kode: 'MAK62407',
+    nama: 'Kimia Material dan Aplikasinya',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Fisik',
+    dosenPengampu: 'Dr. rer. nat. Rachmat Triandi Tjahjanto, M.Sc',
+    ruang: 'R. Kuliah Kimia 3.2 FMIPA',
+    jadwal: 'Rabu, 08.00 - 10.30 WIB'
+  },
+  {
+    id: 'mk-5',
+    kode: 'MAK60001',
+    nama: 'Metodologi Penelitian Kimia & Etika Riset',
+    sks: 2,
+    semester: 7,
+    sifat: 'Wajib',
+    kbk: 'Umum',
+    dosenPengampu: 'Dr. Dra. Sri Wardhani, M.Si',
+    ruang: 'Auditorium FMIPA Lt. 2',
+    jadwal: 'Jumat, 08.30 - 10.10 WIB'
+  },
+  {
+    id: 'mk-6',
+    kode: 'MAK60099',
+    nama: 'Tugas Akhir / Skripsi Kimia',
+    sks: 6,
+    semester: 7,
+    sifat: 'Wajib',
+    kbk: 'Umum',
+    dosenPengampu: 'Tim Dosen Pembimbing Skripsi Kimia UB',
+    ruang: 'Laboratorium Riset Kimia FMIPA',
+    jadwal: 'Fleksibel Mandiri Lab Riset'
+  },
+  {
+    id: 'mk-7',
+    kode: 'MAK62104',
+    nama: 'Biokimia Enzim dan Bioteknologi Terapan',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Biokimia',
+    dosenPengampu: 'Sasangka Prasetyawan, M.S.',
+    ruang: 'R. Kuliah Kimia 1.2 FMIPA',
+    jadwal: 'Rabu, 13.00 - 15.30 WIB'
+  },
+  {
+    id: 'mk-8',
+    kode: 'MAK62205',
+    nama: 'Kimia Analisis Forensik & Toksikologi',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Analitik',
+    dosenPengampu: 'Dr. Akhmad Sabarudin, S.Si., M.Sc.',
+    ruang: 'R. Kuliah Kimia 2.3 FMIPA',
+    jadwal: 'Kamis, 07.30 - 10.00 WIB'
+  },
+  {
+    id: 'mk-9',
+    kode: 'MAK62405',
+    nama: 'Pengantar Simulasi Molekuler & Dinamika Kimia',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Fisik',
+    dosenPengampu: 'Lukman Hakim, S.Si., M.Sc., Ph.D',
+    ruang: 'Lab Komputasi Kimia FMIPA',
+    jadwal: 'Selasa, 13.15 - 15.45 WIB'
+  },
+  {
+    id: 'mk-10',
+    kode: 'MAK62307',
+    nama: 'Kimia Bioanorganik & Kompleks Logam',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Anorganik',
+    dosenPengampu: 'Dra. Zubaidah Ningsih, M.Phil., Ph.D',
+    ruang: 'R. Kuliah Kimia 1.1 FMIPA',
+    jadwal: 'Senin, 10.15 - 12.45 WIB'
+  },
+  {
+    id: 'mk-11',
+    kode: 'MAK62509',
+    nama: 'Kimia Minyak Atsiri, Citarasa & Fragrans',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Organik',
+    dosenPengampu: 'Elvina Dhiaul Iftitah, S.Si., M.Si.',
+    ruang: 'R. Kuliah Kimia 3.3 FMIPA',
+    jadwal: 'Jumat, 13.30 - 16.00 WIB'
+  },
+  {
+    id: 'mk-12',
+    kode: 'MAK62504',
+    nama: 'Biofuel, Katalisis & Energi Terbarukan',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Fisik',
+    dosenPengampu: 'Dr. Ulfa Andayani, M.Si.',
+    ruang: 'R. Kuliah Kimia 2.2 FMIPA',
+    jadwal: 'Kamis, 10.15 - 12.45 WIB'
+  },
+  {
+    id: 'mk-13',
+    kode: 'MAK62602',
+    nama: 'Kimia Pengolahan Limbah & Ekotoksikologi',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Fisik',
+    dosenPengampu: 'Dr. Dra. Sri Wardhani, M.Si',
+    ruang: 'R. Kuliah Kimia 2.1 FMIPA',
+    jadwal: 'Selasa, 08.00 - 10.30 WIB'
+  },
+  {
+    id: 'mk-14',
+    kode: 'MAK62308',
+    nama: 'Nanomaterial & Rekayasa Permukaan Anorganik',
+    sks: 3,
+    semester: 7,
+    sifat: 'Pilihan',
+    kbk: 'Kimia Anorganik',
+    dosenPengampu: 'Dr. Anna Safitri, M.Sc., Ph.D',
+    ruang: 'R. Kuliah Kimia 3.1 FMIPA',
+    jadwal: 'Rabu, 10.15 - 12.45 WIB'
+  }
+];
+
+export const TRANSKRIP_NILAI: NilaiKHS[] = [
+  // SEMESTER 1 (21 SKS) - FMIPA Universitas Brawijaya
+  { kode: 'MAK61001', nama: 'Kimia Dasar I', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 1 },
+  { kode: 'MAK61002', nama: 'Praktikum Kimia Dasar I', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 1 },
+  { kode: 'MAM61001', nama: 'Kalkulus untuk Kimia', sks: 4, nilaiHuruf: 'B+', nilaiAngka: 3.5, semester: 1 },
+  { kode: 'MAF61001', nama: 'Fisika Dasar untuk Kimia', sks: 3, nilaiHuruf: 'B+', nilaiAngka: 3.5, semester: 1 },
+  { kode: 'MAF61002', nama: 'Praktikum Fisika Dasar', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 1 },
+  { kode: 'MAB61001', nama: 'Biologi Dasar untuk Kimia', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 1 },
+  { kode: 'MPK60001', nama: 'Pendidikan Agama Islam', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 1 },
+  { kode: 'MPK60002', nama: 'Pendidikan Pancasila', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 1 },
+  { kode: 'UBU60001', nama: 'Bahasa Indonesia Ilmiah', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 1 },
+  { kode: 'UBU60005', nama: 'Literasi Digital & Komputasi Dasar', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 1 },
+
+  // SEMESTER 2 (21 SKS) - FMIPA Universitas Brawijaya
+  { kode: 'MAK62001', nama: 'Kimia Dasar II', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 2 },
+  { kode: 'MAK62002', nama: 'Praktikum Kimia Dasar II', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 2 },
+  { kode: 'MAK62206', nama: 'Kimia Analisis Dasar', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 2 },
+  { kode: 'MAK62202', nama: 'Praktikum Kimia Analisis Dasar', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 2 },
+  { kode: 'MAK62501', nama: 'Kimia Organik Dasar', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 2 },
+  { kode: 'MAK62502', nama: 'Praktikum Kimia Organik Dasar', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 2 },
+  { kode: 'MAK62301', nama: 'Struktur dan Kereaktifan Senyawa Anorganik', sks: 3, nilaiHuruf: 'B+', nilaiAngka: 3.5, semester: 2 },
+  { kode: 'MAM62001', nama: 'Matematika Kimia', sks: 2, nilaiHuruf: 'B+', nilaiAngka: 3.5, semester: 2 },
+  { kode: 'MPK60003', nama: 'Pendidikan Kewarganegaraan', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 2 },
+  { kode: 'UBU60002', nama: 'Bahasa Inggris Akademik', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 2 },
+
+  // SEMESTER 3 (21 SKS) - FMIPA Universitas Brawijaya
+  { kode: 'MAK61501', nama: 'Kimia Organik Fisik', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 3 },
+  { kode: 'MAK61502', nama: 'Praktikum Kimia Organik', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 3 },
+  { kode: 'MAK61401', nama: 'Termodinamika dan Kesetimbangan Kimia', sks: 3, nilaiHuruf: 'B+', nilaiAngka: 3.5, semester: 3 },
+  { kode: 'MAK61402', nama: 'Praktikum Kimia Fisik', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 3 },
+  { kode: 'MAK61201', nama: 'Kimia Elektroanalisis dan Pemisahan', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 3 },
+  { kode: 'MAK61202', nama: 'Praktikum Kimia Analisis Lanjut', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 3 },
+  { kode: 'MAK61301', nama: 'Kimia Unsur', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 3 },
+  { kode: 'MAK61101', nama: 'Biokimia Struktur dan Fungsi', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 3 },
+  { kode: 'MAK61102', nama: 'Praktikum Biokimia', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 3 },
+  { kode: 'UBU60003', nama: 'Kewirausahaan Berbasis Sains Kimia', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 3 },
+
+  // SEMESTER 4 (20 SKS) - FMIPA Universitas Brawijaya
+  { kode: 'MAK62401', nama: 'Kinetika Kimia & Dinamika Molekul', sks: 3, nilaiHuruf: 'B+', nilaiAngka: 3.5, semester: 4 },
+  { kode: 'MAK62302', nama: 'Kimia Koordinasi dan Senyawa Kompleks', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 4 },
+  { kode: 'MAK62303', nama: 'Praktikum Kimia Anorganik', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 4 },
+  { kode: 'MAK62103', nama: 'Biokimia Metabolisme & Informasi Genetik', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 4 },
+  { kode: 'MAK62201', nama: 'Spektroskopi dan Karakterisasi Molekuler', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 4 },
+  { kode: 'MAK62503', nama: 'Elusidasi Struktur Senyawa Organik', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 4 },
+  { kode: 'MAK60003', nama: 'Kimia Lingkungan', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 4 },
+  { kode: 'MAK62005', nama: 'Keselamatan Kerja Laboratorium & K3', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 4 },
+
+  // SEMESTER 5 (21 SKS) - FMIPA Universitas Brawijaya
+  { kode: 'MAK61403', nama: 'Kimia Kuantum & Spektroskopi Teoretis', sks: 3, nilaiHuruf: 'B+', nilaiAngka: 3.5, semester: 5 },
+  { kode: 'MAK61303', nama: 'Kimia Material dan Aplikasinya', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 5 },
+  { kode: 'MAK61103', nama: 'Biologi Molekuler & Rekayasa Genetik', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 5 },
+  { kode: 'MAK61203', nama: 'Kromatografi dan Teknik Pemisahan Modern', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 5 },
+  { kode: 'MAK61503', nama: 'Sintesis Senyawa Organik', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 5 },
+  { kode: 'MAK61404', nama: 'Kimia Komputasi & Pemodelan Molekuler', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 5 },
+  { kode: 'MAK61004', nama: 'Prinsip Pengukuran Kimia & Validasi Metode', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 5 },
+
+  // SEMESTER 6 (20 SKS) - FMIPA Universitas Brawijaya
+  { kode: 'MAK62002', nama: 'Metodologi Penelitian Kimia & Penulisan Ilmiah', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 6 },
+  { kode: 'MAK62003', nama: 'Seminar Proposal Riset Kimia', sks: 1, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 6 },
+  { kode: 'MAK62004', nama: 'Praktik Kerja Lapang (PKL) / Magang Industri Kimia', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 6 },
+  { kode: 'MAK62403', nama: 'Koloid dan Kimia Permukaan', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 6 },
+  { kode: 'MAK62305', nama: 'Sintesis Anorganik dan Katalisis', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 6 },
+  { kode: 'MAK62203', nama: 'Sensor Elektroanalitik dan Biosensor', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 6 },
+  { kode: 'MAK62505', nama: 'Radiokimia dan Kimia Nuklir', sks: 2, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 6 },
+  { kode: 'MAK62006', nama: 'Etika Profesi dan Manajemen Pengelolaan Bahan Kimia', sks: 3, nilaiHuruf: 'A', nilaiAngka: 4.0, semester: 6 }
+];
+
+export const INITIAL_LOGBOOKS: LogbookLabItem[] = [
+  {
+    id: 'log-1',
+    mahasiswaId: 'mhs-1',
+    mahasiswaNama: 'Ahmad Rizky Pratama',
+    nim: '215090200111012',
+    tanggal: '2026-09-02',
+    aktivitas: 'Ekstraksi dan Isolasi Senyawa Eugenol dari Minyak Cengkeh menggunakan metode distilasi fraksinasi vakum.',
+    lab: 'Laboratorium Kimia Organik & Bahan Alam',
+    instrumenDigunakan: ['Distilasi Vakum Buchi', 'Refraktometer Abbe', 'Neraca Analitik Mettler Toledo'],
+    bahanKimiaUtama: 'Minyak daun cengkeh murni, NaOH 10%, n-heksana p.a, HCl pekat, Na2SO4 anhidrat.',
+    hasilDanTemuan: 'Didapatkan isolat fraksi eugenol dengan rendemen 78.4% berupa cairan kekuningan beraroma khas cengkeh dengan indeks bias 1.5410 (mendekati standar teoritis 1.5415).',
+    catatanDosen: 'Hasil fraksi cukup baik dan rendemen tinggi. Lanjutkan reaksi asetilasi untuk sintesis eugenil asetat besok.',
+    statusVerifikasi: 'Disetujui',
+    dosenVerifikator: 'Masruri, S.Si., M.Si., Ph.D',
+    tanggalVerifikasi: '2026-09-03'
+  },
+  {
+    id: 'log-2',
+    mahasiswaId: 'mhs-1',
+    mahasiswaNama: 'Ahmad Rizky Pratama',
+    nim: '215090200111012',
+    tanggal: '2026-09-06',
+    aktivitas: 'Sintesis turunan eugenil asetat melalui esterifikasi anhidrida asetat dengan katalis asam piridin.',
+    lab: 'Laboratorium Kimia Organik & Bahan Alam',
+    instrumenDigunakan: ['Heating Mantle & Magnetic Stirrer', 'Rotary Evaporator Hei-VAP', 'KLT UV-Cabinet (254 & 366 nm)'],
+    bahanKimiaUtama: 'Eugenol hasil isolasi, anhidrida asetat p.a, piridin, etil asetat, n-heksana, akuades.',
+    hasilDanTemuan: 'Reaksi refluks berjalan selama 4 jam pada suhu 80C. Monitoring KLT (heksan:etil asetat 8:2) menunjukkan bercak tunggal dengan Rf 0.65 berbeda dari eugenol (Rf 0.42). Rendemen kristal produk 82.1%.',
+    catatanDosen: 'Bagus. Pastikan sampel dikeringkan dalam desikator sebelum analisis spektroskopi FTIR dan GC-MS.',
+    statusVerifikasi: 'Disetujui',
+    dosenVerifikator: 'Masruri, S.Si., M.Si., Ph.D',
+    tanggalVerifikasi: '2026-09-07'
+  },
+  {
+    id: 'log-3',
+    mahasiswaId: 'mhs-1',
+    mahasiswaNama: 'Ahmad Rizky Pratama',
+    nim: '215090200111012',
+    tanggal: '2026-09-11',
+    aktivitas: 'Karakterisasi Gugus Fungsi Produk Sintesis menggunakan Spektrometer FTIR Shimadzu IRAffinity-1S.',
+    lab: 'Laboratorium Kimia Analitik & Instrumentasi',
+    instrumenDigunakan: ['FTIR Shimadzu IRAffinity-1S (ATR Golden Gate)', 'Sonicator Bath'],
+    bahanKimiaUtama: 'Sampel eugenol dan isolat eugenil asetat murni, etanol 96% untuk pembersihan kristal ATR.',
+    hasilDanTemuan: 'Spektrum FTIR menunjukkan hilangnya serapan lebar gugus -OH fenolik pada 3450 cm-1 dan munculnya serapan khas ester C=O pada 1765 cm-1 serta vibrasi regang C-O ester pada 1205 cm-1.',
+    catatanDosen: 'Spektrum terlampir sangat tajam. Masukkan perbandingan spektrum komparatif di Bab 4.',
+    statusVerifikasi: 'Disetujui',
+    dosenVerifikator: 'Dr. Dra. Hermin Sulistyarti, M.Si',
+    tanggalVerifikasi: '2026-09-12'
+  },
+  {
+    id: 'log-4',
+    mahasiswaId: 'mhs-1',
+    mahasiswaNama: 'Ahmad Rizky Pratama',
+    nim: '215090200111012',
+    tanggal: '2026-09-14',
+    aktivitas: 'Uji Aktivitas Antibakteri Metode Difusi Cakram Paper Disc terhadap bakteri Gram-Positif Staphylococcus aureus.',
+    lab: 'Laboratorium Biokimia & Enzim',
+    instrumenDigunakan: ['Autoklaf Hirayama', 'Biosafety Cabinet (Laminar Air Flow)', 'Inkubator Memmert 37C', 'Jangka Sorong Digital'],
+    bahanKimiaUtama: 'Media Nutrient Agar (NA), Suspensi bakteri S. aureus standar McFarland 0.5, Amoksisilin 10 mcg (kontrol positif), DMSO 10% (kontrol negatif).',
+    hasilDanTemuan: 'Pengukuran zona hambat setelah inkubasi 24 jam menunjukkan diameter zona bening eugenil asetat konsentrasi 5% sebesar 16.4 mm (kategori kuat) dibandingkan amoksisilin 22.1 mm.',
+    catatanDosen: 'Lakukan pengulangan triplo (triplicate) untuk memperoleh standar deviasi yang valid.',
+    statusVerifikasi: 'Menunggu Verifikasi',
+    dosenVerifikator: 'Dr. Anna Safitri, M.Sc., Ph.D'
+  }
+];
+
+export const INITIAL_SEMINAR: JadwalSeminar[] = [
+  {
+    id: 'sem-1',
+    jenis: 'Seminar Proposal',
+    mahasiswaNama: 'Ahmad Rizky Pratama',
+    nim: '215090200111012',
+    judul: 'Isolasi dan Modifikasi Struktur Senyawa Eugenol dari Minyak Atsiri Cengkeh serta Uji Aktivitas Antibakteri',
+    dosenPembimbing: 'Masruri, S.Si., M.Si., Ph.D',
+    dosenPenguji1: 'Dr. Dra. Hermin Sulistyarti, M.Si',
+    dosenPenguji2: 'Dr. Anna Safitri, M.Sc., Ph.D',
+    tanggal: '2026-05-18',
+    waktu: '09.00 - 10.30 WIB',
+    ruangan: 'Ruang Seminar Kimia FMIPA Lt. 2',
+    status: 'Selesai',
+    nilaiAkhir: 88.5
+  },
+  {
+    id: 'sem-2',
+    jenis: 'Seminar Hasil',
+    mahasiswaNama: 'Dewi Lestari Kusuma',
+    nim: '215090201111024',
+    judul: 'Sintesis Nanokomposit Fe3O4@Zeolit Alam Malang sebagai Adsorben Ion Logam Kadmium (Cd2+) pada Limbah Cair',
+    dosenPembimbing: 'Dr. Dra. Sri Wardhani, M.Si',
+    dosenPenguji1: 'Dr. rer. nat. Rachmat Triandi Tjahjanto, M.Sc',
+    dosenPenguji2: 'Zubaidah Ningsih, S.Si., M.Phil., Ph.D',
+    tanggal: '2026-09-18',
+    waktu: '10.00 - 11.30 WIB',
+    ruangan: 'Ruang Sidang Jurusan Kimia Lt. 3',
+    status: 'Terjadwal'
+  },
+  {
+    id: 'sem-3',
+    jenis: 'Ujian Skripsi',
+    mahasiswaNama: 'Bagas Aditya Wicaksono',
+    nim: '205090200111005',
+    judul: 'Imobilisasi Enzim Lipase Termofilik pada Matriks Kitosan-Glutaraldehid untuk Sintesis Biodiesel dari Minyak Jelantah',
+    dosenPembimbing: 'Dr. Anna Safitri, M.Sc., Ph.D',
+    dosenPenguji1: 'Dr. Arie Srihardyastutie, S.Si., M.Kes',
+    dosenPenguji2: 'Masruri, S.Si., M.Si., Ph.D',
+    tanggal: '2026-09-22',
+    waktu: '13.30 - 15.30 WIB',
+    ruangan: 'Ruang Ujian Sarjana Kimia Gedung MIPA Center',
+    status: 'Terjadwal'
+  }
+];
+
+export const INITIAL_SURAT: SuratPengajuan[] = [
+  {
+    id: 'srt-1',
+    nomorSurat: '0412/UN10.F09/AK/2026',
+    jenis: 'Surat Izin Penelitian Laboratorium',
+    mahasiswaId: 'mhs-1',
+    mahasiswaNama: 'Ahmad Rizky Pratama',
+    nim: '215090200111012',
+    tujuan: 'Kepala UPT Laboratorium Riset Terpadu Universitas Brawijaya',
+    keperluan: 'Analisis Karakterisasi Spektrometri Massa (GC-MS Agilent) dan FTIR untuk sampel riset Tugas Akhir S1 Kimia.',
+    tanggalPengajuan: '2026-08-25',
+    status: 'Disetujui & Diterbitkan'
+  },
+  {
+    id: 'srt-2',
+    nomorSurat: '0589/UN10.F09/AK/2026',
+    jenis: 'Surat Aktif Kuliah',
+    mahasiswaId: 'mhs-1',
+    mahasiswaNama: 'Ahmad Rizky Pratama',
+    nim: '215090200111012',
+    tujuan: 'Kementerian Keuangan RI / Lembaga Beasiswa Unggulan',
+    keperluan: 'Kelengkapan administrasi perpanjangan beasiswa semester ganjil 2026/2027.',
+    tanggalPengajuan: '2026-09-01',
+    status: 'Disetujui & Diterbitkan'
+  }
+];
+
+export const PENGUMUMAN_LIST: Pengumuman[] = [];
+
+export const INITIAL_KLK: PengajuanKLK[] = [];
+
+
+export const DAFTAR_MITRA_KLK: MitraIndustriKLK[] = [
+  {
+    id: 'mitra-1',
+    nama: 'PT Petrokimia Gresik',
+    kategori: 'Industri Kimia & Petrokimia',
+    lokasi: 'Gresik, Jawa Timur',
+    alamat: 'Jl. Jenderal Ahmad Yani, Gresik 61119',
+    deskripsi: 'Produsen pupuk dan bahan kimia terlengkap di Indonesia dengan fasilitas laboratorium QC, R&D pupuk majemuk, laboratorium analisis tanah dan tanaman.',
+    kuotaPerSemester: 8,
+    kontakHR: 'career@petrokimia-gresik.com',
+    website: 'https://petrokimia-gresik.com'
+  },
+  {
+    id: 'mitra-2',
+    nama: 'Pusat Riset Kimia - BRIN',
+    kategori: 'Lembaga Riset & Pemerintah',
+    lokasi: 'KST Serpong & Cibinong',
+    alamat: 'Kawasan Sains dan Teknologi B.J. Habibie Serpong, Tangerang Selatan',
+    deskripsi: 'Pusat riset kimia nasional terdepan dengan fasilitas instrumen mutakhir (NMR 500 MHz, HR-TEM, FE-SEM, Single Crystal XRD, LC-MS/MS).',
+    kuotaPerSemester: 12,
+    kontakHR: 'layanan.riset@brin.go.id',
+    website: 'https://brin.go.id'
+  },
+  {
+    id: 'mitra-3',
+    nama: 'PT Kalbe Farma Tbk',
+    kategori: 'Farmasi & Bioteknologi',
+    lokasi: 'Cikarang & Pulo Gadung, Jakarta',
+    alamat: 'Jl. Letjen Suprapto Kav. 4, Cempaka Putih, Jakarta Pusat',
+    deskripsi: 'Perusahaan farmasi publik terbesar di Asia Tenggara dengan fokus analisis kimia analitik farmasi, sintesis API, validasi metode, dan formulasi eksipien.',
+    kuotaPerSemester: 6,
+    kontakHR: 'recruitment.rd@kalbe.co.id',
+    website: 'https://kalbe.co.id'
+  },
+  {
+    id: 'mitra-4',
+    nama: 'PT Sucofindo (Persero)',
+    kategori: 'Laboratorium Pengujian Lingkungan',
+    lokasi: 'Surabaya, Malang, & Jakarta',
+    alamat: 'Jl. Ahmad Yani No. 315, Wonocolo, Surabaya',
+    deskripsi: 'BUMN inspeksi, pengujian, dan sertifikasi dengan akreditasi KAN ISO 17025 untuk uji kualitas air, udara emisi, tanah, makanan, dan mineral tambang.',
+    kuotaPerSemester: 10,
+    kontakHR: 'hrd.surabaya@sucofindo.co.id',
+    website: 'https://sucofindo.co.id'
+  },
+  {
+    id: 'mitra-5',
+    nama: 'PT Indofood CBP Sukses Makmur Tbk',
+    kategori: 'Pangan & FMCG',
+    lokasi: 'Pasuruan & Semarang',
+    alamat: 'Kawasan Berikat PIER Pasuruan, Jawa Timur',
+    deskripsi: 'Laboratorium Quality Assurance & Food Chemistry terpadu untuk pengujian proksimat, asam lemak, vitamin, zat aditif, mikotoksin, dan residu pestisida.',
+    kuotaPerSemester: 5,
+    kontakHR: 'hr.icbp@icbp.indofood.co.id',
+    website: 'https://indofoodcbp.com'
+  },
+  {
+    id: 'mitra-6',
+    nama: 'Balai Besar Standardisasi & Pelayanan Jasa Industri (BBSPJIKKP)',
+    kategori: 'Lembaga Riset & Pemerintah',
+    lokasi: 'Yogyakarta & Surabaya',
+    alamat: 'Jl. Sokonandi No. 9, Semaki, Yogyakarta',
+    deskripsi: 'Lembaga pengujian di bawah Kementerian Perindustrian RI bidang kimia polimer, kulit, karet, plastik, dan daur ulang material kimia ramah lingkungan.',
+    kuotaPerSemester: 6,
+    kontakHR: 'info@bbkkp.go.id',
+    website: 'https://kemenperin.go.id'
+  }
+];
+
+export const DOKUMEN_KLK_STANDARD_LIST: DokumenPanduanKLK[] = [
+  {
+    id: 'dok-klk-1',
+    judul: 'Pedoman Pelaksanaan Kegiatan Mahasiswa di Luar Kampus (KLK) Departemen Kimia UB 2026',
+    kategori: 'Pedoman',
+    deskripsi: 'Buku panduan resmi syarat kelayakan SKS, konversi matakuliah, etika kerja di industri, dan alur administrasi KLK/PKL.',
+    ukuranFile: '2.8 MB',
+    tanggalUpdate: '15 Januari 2026',
+    tipe: 'PDF'
+  },
+  {
+    id: 'dok-klk-2',
+    judul: 'Form Persetujuan Kegiatan Mahasiswa di Luar Kampus (Form KLK)',
+    kategori: 'Formulir',
+    deskripsi: 'Formulir wajib bukti rencana studi dan instrumen kontrol progres KLK yang harus ditandatangani Dosen PA & Koordinator Departemen.',
+    ukuranFile: '420 KB',
+    tanggalUpdate: '02 Februari 2026',
+    tipe: 'DOCX'
+  },
+  {
+    id: 'dok-klk-3',
+    judul: 'Materi Pembekalan dan Sosialisasi KLK & MBKM Tahap I & Tahap II',
+    kategori: 'Materi Sosialisasi',
+    deskripsi: 'Slide presentasi pembekalan keselamatan industri, penulisan logbook mingguan, serta teknis konversi 4 s.d. 20 SKS.',
+    ukuranFile: '5.1 MB',
+    tanggalUpdate: '10 Februari 2026',
+    tipe: 'PPTX'
+  },
+  {
+    id: 'dok-klk-4',
+    judul: 'Formulir Penilaian Mitra Industri & Pembimbing Lapangan KLK',
+    kategori: 'Template',
+    deskripsi: 'Lembar evaluasi capaian kerja mahasiswa di industri meliputi aspek kedisiplinan, integritas, penguasaan metode kimia, dan penyusunan laporan.',
+    ukuranFile: '310 KB',
+    tanggalUpdate: '20 Januari 2026',
+    tipe: 'PDF'
+  },
+  {
+    id: 'dok-klk-5',
+    judul: 'Format Baku Laporan Akhir Praktik Kerja Lapang (PKL) & KLK Kimia UB',
+    kategori: 'Template',
+    deskripsi: 'Template resmi laporan KLK mencakup abstrak dua bahasa, tinjauan proses kimia industri, pembahasan hasil uji, dan lampiran data instrumen.',
+    ukuranFile: '850 KB',
+    tanggalUpdate: '25 Januari 2026',
+    tipe: 'DOCX'
+  }
+];
+
+export const DOKUMEN_KLK_LIST: DokumenPanduanKLK[] = [];
