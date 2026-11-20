@@ -2,6 +2,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  DocumentReference,
   getDoc,
   getDocs,
   limit,
@@ -912,9 +913,6 @@ export function extractUidFromSdmOrUser(
   if (typeof entity.userUid === 'string' && AUTH_UID_REGEX.test(entity.userUid.trim())) {
     return entity.userUid.trim();
   }
-  if (typeof entity.ownerUid === 'string' && AUTH_UID_REGEX.test(entity.ownerUid.trim())) {
-    return entity.ownerUid.trim();
-  }
   if (typeof entity.id === 'string') {
     const idTrim = entity.id.trim();
     const prefMatch = idTrim.match(SDM_UID_PREFIX_REGEX);
@@ -940,7 +938,33 @@ export function extractUidFromSdmOrUser(
       if (AUTH_UID_REGEX.test(matchedUser.id)) return matchedUser.id;
     }
   }
+  if (typeof entity.ownerUid === 'string' && AUTH_UID_REGEX.test(entity.ownerUid.trim())) {
+    return entity.ownerUid.trim();
+  }
   return '';
+}
+
+async function safeGetDocState(docRef: DocumentReference): Promise<{
+  exists: boolean;
+  ownerUid?: string;
+}> {
+  try {
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) {
+      return { exists: false };
+    }
+    const rawOwner = snap.data()?.ownerUid;
+    return {
+      exists: true,
+      ownerUid: typeof rawOwner === 'string' ? rawOwner : undefined
+    };
+  } catch (err: unknown) {
+    const code = (err as { code?: string })?.code || '';
+    if (code === 'permission-denied') {
+      return { exists: false };
+    }
+    throw err;
+  }
 }
 
 export function enrichKlkUids(
@@ -1117,24 +1141,35 @@ export async function syncKlkListToFirestore(
             : buildNonAdminUpdate()
         );
       } else {
-        const snap = await getDoc(docRef);
+        const docState = await safeGetDocState(docRef);
         if (meta.syncVersions[colName] !== myVersion) return;
-        if (snap.exists()) {
-          const existingOwnerUid = typeof snap.data()?.ownerUid === 'string' ? (snap.data().ownerUid as string) : undefined;
+        if (docState.exists) {
           await updateDoc(
             docRef,
             isAdmin
               ? { ...baseFields, updatedAt: serverTimestamp() }
-              : buildNonAdminUpdate(existingOwnerUid)
+              : buildNonAdminUpdate(docState.ownerUid)
           );
+          if (docState.ownerUid) ownerMap[docId] = docState.ownerUid;
         } else {
-          await setDoc(docRef, {
-            id: docId,
-            ownerUid: ownerMap[docId] || uid,
-            ...baseFields,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp()
-          });
+          const resolvedOwner = ownerMap[docId] || uid;
+          try {
+            await setDoc(docRef, {
+              id: docId,
+              ownerUid: resolvedOwner,
+              ...baseFields,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp()
+            });
+            ownerMap[docId] = resolvedOwner;
+          } catch (setErr: unknown) {
+            const code = (setErr as { code?: string })?.code || '';
+            if (!isAdmin && code === 'permission-denied') {
+              await updateDoc(docRef, buildNonAdminUpdate());
+            } else {
+              throw setErr;
+            }
+          }
         }
         known.add(docId);
       }
@@ -1161,6 +1196,7 @@ export async function syncKlkListToFirestore(
 
   if (meta.syncVersions[colName] === myVersion) {
     meta.knownIds[colName] = known;
+    meta.ownerMap[colName] = ownerMap;
     meta.hashes[colName] = prevHashes;
   }
 }
@@ -1421,9 +1457,9 @@ export async function syncLogbooksToFirestore(
       if (known.has(docId)) {
         await updateDoc(docRef, isAdmin ? { ...payload, updatedAt: serverTimestamp() } : nonAdminUpdate);
       } else {
-        const snap = await getDoc(docRef);
+        const docState = await safeGetDocState(docRef);
         if (meta.syncVersions[colName] !== myVersion) return;
-        if (snap.exists()) {
+        if (docState.exists) {
           await updateDoc(docRef, isAdmin ? { ...payload, updatedAt: serverTimestamp() } : nonAdminUpdate);
         } else {
           await setDoc(docRef, {
@@ -1497,9 +1533,9 @@ export async function syncSeminarsToFirestore(
       if (known.has(docId)) {
         await updateDoc(docRef, { ...payload, updatedAt: serverTimestamp() });
       } else {
-        const snap = await getDoc(docRef);
+        const docState = await safeGetDocState(docRef);
         if (meta.syncVersions[colName] !== myVersion) return;
-        if (snap.exists()) {
+        if (docState.exists) {
           await updateDoc(docRef, { ...payload, updatedAt: serverTimestamp() });
         } else {
           await setDoc(docRef, {
@@ -1573,9 +1609,9 @@ export async function syncSuratListToFirestore(
       if (known.has(docId)) {
         await updateDoc(docRef, { ...payload, updatedAt: serverTimestamp() });
       } else {
-        const snap = await getDoc(docRef);
+        const docState = await safeGetDocState(docRef);
         if (meta.syncVersions[colName] !== myVersion) return;
-        if (snap.exists()) {
+        if (docState.exists) {
           await updateDoc(docRef, { ...payload, updatedAt: serverTimestamp() });
         } else {
           await setDoc(docRef, {

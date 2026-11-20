@@ -157,6 +157,10 @@ export default function App() {
   const [isAuthReady, setIsAuthReady] = useState<boolean>(false);
   const remoteMetaRef = useRef(createEmptyRemoteSyncMeta());
   const remoteApplyDepthRef = useRef<number>(0);
+  const klkRemoteApplyRef = useRef<boolean>(false);
+  const pendingLocalKlkSyncRef = useRef<boolean>(false);
+  const allowKlkDeletesRef = useRef<boolean>(false);
+  const [klkRemoteReadyVersion, setKlkRemoteReadyVersion] = useState<number>(0);
   const hasSeededCloudRef = useRef<boolean>(false);
 
   const applyFromRemote = (updater: () => void) => {
@@ -503,7 +507,8 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
       remoteMetaRef.current,
       {
         onKlkUpdate: (remoteItems) => {
-          applyFromRemote(() => setKlkList(remoteItems));
+          klkRemoteApplyRef.current = true;
+          setKlkList(remoteItems);
         },
         onUsersUpdate: (remoteUsers) => {
           if (remoteUsers.length === 0) return;
@@ -552,6 +557,11 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
         onPengumumanUpdate: (items) => {
           if (items.length === 0) return;
           applyFromRemote(() => setPengumumanList(items));
+        },
+        onRemoteReady: (colName) => {
+          if (colName === 'klk_submissions') {
+            setKlkRemoteReadyVersion((v) => v + 1);
+          }
         }
       }
     );
@@ -609,8 +619,17 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
   const isAdminUser = isBootstrappedAdminEmail(firebaseUser?.email, firebaseUser?.emailVerified) || currentRole === 'super_admin' || currentRole === 'admin';
 
   useEffect(() => {
-    if (!isAuthReady || !firebaseUser || !currentUser || remoteApplyDepthRef.current > 0) return;
+    if (!isAuthReady || !firebaseUser || !currentUser) return;
     if (!remoteMetaRef.current.readyCollections.has('klk_submissions')) return;
+    if (klkRemoteApplyRef.current && !pendingLocalKlkSyncRef.current) {
+      klkRemoteApplyRef.current = false;
+      return;
+    }
+    klkRemoteApplyRef.current = false;
+    pendingLocalKlkSyncRef.current = false;
+    const shouldAllowDeletes = isAdminUser && allowKlkDeletesRef.current;
+    allowKlkDeletesRef.current = false;
+
     const enrichedKlkList = klkList.map((item) =>
       enrichKlkUids(item, { dosenList, pembimbingLapanganList, mahasiswaList, userList })
     );
@@ -618,10 +637,10 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
       enrichedKlkList,
       firebaseUser,
       remoteMetaRef.current,
-      isAdminUser,
+      shouldAllowDeletes,
       isAdminUser
     ).catch((err) => console.error('Sync KLK error:', err));
-  }, [klkList, dosenList, pembimbingLapanganList, mahasiswaList, userList, isAuthReady, firebaseUser, currentUser, currentRole]);
+  }, [klkList, dosenList, pembimbingLapanganList, mahasiswaList, userList, isAuthReady, firebaseUser, currentUser, currentRole, klkRemoteReadyVersion]);
 
   useEffect(() => {
     if (!isAuthReady || !firebaseUser || !currentUser || remoteApplyDepthRef.current > 0) return;
@@ -1274,7 +1293,12 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
 
   // Handlers for KLK
   const handleAddKLK = (newKLK: PengajuanKLK) => {
-    const enrichedNewKlk = enrichKlkUids(newKLK, {
+    pendingLocalKlkSyncRef.current = true;
+    const withOwner: PengajuanKLK =
+      firebaseUser?.uid && !newKLK.ownerUid
+        ? { ...newKLK, ownerUid: firebaseUser.uid }
+        : newKLK;
+    const enrichedNewKlk = enrichKlkUids(withOwner, {
       dosenList,
       pembimbingLapanganList,
       mahasiswaList,
@@ -1298,6 +1322,7 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
   };
 
   const handleUpdateKLK = (updatedKlk: PengajuanKLK) => {
+    pendingLocalKlkSyncRef.current = true;
     const enrichedUpdated = enrichKlkUids(updatedKlk, {
       dosenList,
       pembimbingLapanganList,
@@ -1314,6 +1339,7 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     status: PengajuanKLK['status'],
     nomorSurat?: string
   ) => {
+    pendingLocalKlkSyncRef.current = true;
     const waktuNow = new Date().toLocaleString('id-ID', {
       day: '2-digit',
       month: 'short',
@@ -1346,6 +1372,7 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
   };
 
   const handleAddKLKLogbook = (klkId: string, logbook: LogbookMingguanKLK) => {
+    pendingLocalKlkSyncRef.current = true;
     setKlkList((prev) =>
       prev.map((k) =>
         k.id === klkId
@@ -1364,6 +1391,7 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     status: LogbookMingguanKLK['statusVerifikasi'],
     catatan: string
   ) => {
+    pendingLocalKlkSyncRef.current = true;
     setKlkList((prev) =>
       prev.map((k) => {
         if (k.id !== klkId) return k;
@@ -1390,6 +1418,7 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     nilaiDosen: number,
     nilaiHuruf: 'A' | 'B+' | 'B' | 'C+' | 'C'
   ) => {
+    pendingLocalKlkSyncRef.current = true;
     setKlkList((prev) =>
       prev.map((k) =>
         k.id === klkId
@@ -1411,6 +1440,7 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     pukulUjian: string,
     ruangUjian: string
   ) => {
+    pendingLocalKlkSyncRef.current = true;
     setKlkList((prev) =>
       prev.map((k) =>
         k.id === klkId
@@ -1426,6 +1456,8 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
   };
 
   const handleResetAllKLK = () => {
+    pendingLocalKlkSyncRef.current = true;
+    allowKlkDeletesRef.current = true;
     setKlkList([]);
     try {
       localStorage.setItem('sikma_klk_data', JSON.stringify([]));
@@ -1441,6 +1473,8 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
   };
 
   const handleDeleteKLK = (id: string) => {
+    pendingLocalKlkSyncRef.current = true;
+    allowKlkDeletesRef.current = true;
     setKlkList((prev) => {
       const next = prev.filter((k) => k.id !== id);
       try {

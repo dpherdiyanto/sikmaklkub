@@ -3607,8 +3607,18 @@ export const KlkView: React.FC<KlkViewProps> = ({
   // Dosen PA untuk sekurang-kurangnya satu mahasiswa di daftar mahasiswa atau daftar KLK
   const isDosenPAForAnyKlk = useMemo(() => {
     if (!effectiveUser) return false;
+    const userUid = effectiveUser.id || '';
+    const userOwnerUid = (effectiveUser as unknown as { ownerUid?: string }).ownerUid || '';
 
     const isPaInMhs = mahasiswaList.some((m) => {
+      if (
+        m.dosenPAId &&
+        (m.dosenPAId === userUid ||
+          m.dosenPAId === `dos-${userUid}` ||
+          (userOwnerUid && (m.dosenPAId === userOwnerUid || m.dosenPAId === `dos-${userOwnerUid}`)))
+      ) {
+        return true;
+      }
       const dpaNama = m.dosenPANama || '';
       const dpaNip = m.dosenPANip || '';
       if (!dpaNama && !dpaNip) return false;
@@ -4360,10 +4370,66 @@ export const KlkView: React.FC<KlkViewProps> = ({
     setDosenVerifikasiPage(1);
   }, [dosenSearchQuery, dosenStatusFilter, dosenBimbinganOnly, currentRole]);
 
+  // Scope dasar untuk tab Verifikasi Pengajuan KLK (Dosen)
+  const dosenRoleScopedList = useMemo(() => {
+    if (isDosen || currentRole === 'dosen' || dosenBimbinganOnly) {
+      return klkList.filter((item) => checkIsDosenPAForStudent(effectiveUser, item, mahasiswaList));
+    }
+    return klkList;
+  }, [klkList, isDosen, currentRole, dosenBimbinganOnly, effectiveUser, mahasiswaList]);
+
+  // Filter daftar mahasiswa untuk Box Kiri Verifikasi Dosen (Hanya DPA yang bersangkutan saat dosen login)
+  const filteredDosenList = useMemo(() => {
+    return dosenRoleScopedList.filter((item) => {
+      const q = dosenSearchQuery.toLowerCase().trim();
+      const matchesSearch =
+        !q ||
+        item.mahasiswaNama.toLowerCase().includes(q) ||
+        item.nim.includes(q) ||
+        item.skema.toLowerCase().includes(q) ||
+        item.namaMitra.toLowerCase().includes(q) ||
+        (item.dosenPembimbingKLK && item.dosenPembimbingKLK.toLowerCase().includes(q));
+
+      const isDosenApproved = item.statusVerifikasiDosen === 'Disetujui Dosen' || item.status === 'Disetujui / Sedang Berjalan';
+      const isDosenRevisi = item.statusVerifikasiDosen === 'Perlu Revisi';
+      const isDosenDitolak = item.statusVerifikasiDosen === 'Ditolak' || item.status === 'Ditolak';
+      const isDosenPending = !isDosenApproved && !isDosenDitolak && !isDosenRevisi;
+
+      const matchesStatus =
+        dosenStatusFilter === 'Semua' ||
+        (dosenStatusFilter === 'Perlu Persetujuan' && isDosenPending) ||
+        (dosenStatusFilter === 'Disetujui Dosen' && isDosenApproved) ||
+        (dosenStatusFilter === 'Perlu Revisi' && isDosenRevisi) ||
+        (dosenStatusFilter === 'Ditolak' && isDosenDitolak);
+
+      return matchesSearch && matchesStatus;
+    });
+  }, [dosenRoleScopedList, dosenSearchQuery, dosenStatusFilter]);
+
+  // Deduplikasi ketat per mahasiswa (Satu entitas/modal terpadu per mahasiswa)
+  const consolidatedDosenList = useMemo(() => {
+    const map = new Map<string, PengajuanKLK>();
+    for (const item of filteredDosenList) {
+      const cleanNim = (item.nim || '').replace(/\D/g, '');
+      const key = cleanNim || item.mahasiswaId || item.mahasiswaNama.toLowerCase().trim();
+      if (!map.has(key)) {
+        map.set(key, item);
+      } else {
+        const existing = map.get(key)!;
+        const timeExisting = (existing as any).timestamp || (existing.waktuSubmit ? new Date(existing.waktuSubmit).getTime() : 0);
+        const timeItem = (item as any).timestamp || (item.waktuSubmit ? new Date(item.waktuSubmit).getTime() : 0);
+        if (timeItem > timeExisting) {
+          map.set(key, item);
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [filteredDosenList]);
+
   // Item terpilih verifikasi Dosen
   const selectedDosenKlk = useMemo(() => {
-    return klkList.find((k) => k.id === selectedDosenKlkId) || klkList[0] || null;
-  }, [klkList, selectedDosenKlkId]);
+    return consolidatedDosenList.find((k) => k.id === selectedDosenKlkId) || consolidatedDosenList[0] || null;
+  }, [consolidatedDosenList, selectedDosenKlkId]);
 
   // Mahasiswa record untuk item terpilih
   const selectedDosenKlkStudent = useMemo(() => {
@@ -5233,59 +5299,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
     }, 6000);
   };
 
-  // Filter daftar mahasiswa untuk Box Kiri Verifikasi Dosen (Hanya DPA yang bersangkutan saat dosen login)
-  const filteredDosenList = useMemo(() => {
-    return klkList.filter((item) => {
-      const q = dosenSearchQuery.toLowerCase().trim();
-      const matchesSearch =
-        !q ||
-        item.mahasiswaNama.toLowerCase().includes(q) ||
-        item.nim.includes(q) ||
-        item.skema.toLowerCase().includes(q) ||
-        item.namaMitra.toLowerCase().includes(q) ||
-        (item.dosenPembimbingKLK && item.dosenPembimbingKLK.toLowerCase().includes(q));
-
-      const isDosenApproved = item.statusVerifikasiDosen === 'Disetujui Dosen' || item.status === 'Disetujui / Sedang Berjalan';
-      const isDosenRevisi = item.statusVerifikasiDosen === 'Perlu Revisi';
-      const isDosenDitolak = item.statusVerifikasiDosen === 'Ditolak' || item.status === 'Ditolak';
-      const isDosenPending = !isDosenApproved && !isDosenDitolak && !isDosenRevisi;
-
-      const matchesStatus =
-        dosenStatusFilter === 'Semua' ||
-        (dosenStatusFilter === 'Perlu Persetujuan' && isDosenPending) ||
-        (dosenStatusFilter === 'Disetujui Dosen' && isDosenApproved) ||
-        (dosenStatusFilter === 'Perlu Revisi' && isDosenRevisi) ||
-        (dosenStatusFilter === 'Ditolak' && isDosenDitolak);
-
-      // Filter DPA / Dosen Pembimbing Akademik khusus untuk role Dosen
-      let matchesBimbingan = true;
-      if (isDosen || currentRole === 'dosen' || dosenBimbinganOnly) {
-        matchesBimbingan = checkIsDosenPAForStudent(effectiveUser, item, mahasiswaList);
-      }
-
-      return matchesSearch && matchesStatus && matchesBimbingan;
-    });
-  }, [klkList, dosenSearchQuery, dosenStatusFilter, dosenBimbinganOnly, effectiveUser, isDosen, currentRole, mahasiswaList]);
-
-  // Deduplikasi ketat per mahasiswa (Satu entitas/modal terpadu per mahasiswa)
-  const consolidatedDosenList = useMemo(() => {
-    const map = new Map<string, PengajuanKLK>();
-    for (const item of filteredDosenList) {
-      const cleanNim = (item.nim || '').replace(/\D/g, '');
-      const key = cleanNim || item.mahasiswaId || item.mahasiswaNama.toLowerCase().trim();
-      if (!map.has(key)) {
-        map.set(key, item);
-      } else {
-        const existing = map.get(key)!;
-        const timeExisting = (existing as any).timestamp || (existing.waktuSubmit ? new Date(existing.waktuSubmit).getTime() : 0);
-        const timeItem = (item as any).timestamp || (item.waktuSubmit ? new Date(item.waktuSubmit).getTime() : 0);
-        if (timeItem > timeExisting) {
-          map.set(key, item);
-        }
-      }
-    }
-    return Array.from(map.values());
-  }, [filteredDosenList]);
+  // Daftar mahasiswa untuk Box Kiri Verifikasi Dosen sudah dihitung melalui dosenRoleScopedList, filteredDosenList, dan consolidatedDosenList di atas
 
   // Sinkronisasi id terpilih jika list berubah
   useEffect(() => {
@@ -10261,9 +10275,9 @@ ${instansiMitra}
             >
               <UserCheck className="w-4 h-4 text-[#D4AF37]" />
               <span>Verifikasi Pengajuan KLK (Dosen)</span>
-              {klkList.filter((k) => k.statusVerifikasiDosen === 'Menunggu Verifikasi' || !k.statusVerifikasiDosen || (k.status === 'Diproses' && k.statusVerifikasiDosen !== 'Disetujui Dosen')).length > 0 && (
+              {dosenRoleScopedList.filter((k) => k.statusVerifikasiDosen === 'Menunggu Verifikasi' || !k.statusVerifikasiDosen || (k.status === 'Diproses' && k.statusVerifikasiDosen !== 'Disetujui Dosen')).length > 0 && (
                 <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-blue-100 text-[#002B49]">
-                  {klkList.filter((k) => k.statusVerifikasiDosen === 'Menunggu Verifikasi' || !k.statusVerifikasiDosen || (k.status === 'Diproses' && k.statusVerifikasiDosen !== 'Disetujui Dosen')).length}
+                  {dosenRoleScopedList.filter((k) => k.statusVerifikasiDosen === 'Menunggu Verifikasi' || !k.statusVerifikasiDosen || (k.status === 'Diproses' && k.statusVerifikasiDosen !== 'Disetujui Dosen')).length}
                 </span>
               )}
             </button>
@@ -13768,13 +13782,13 @@ ${instansiMitra}
               <div className="bg-white/10 px-3 py-2 rounded-xl border border-white/15 text-right">
                 <div className="text-[10px] text-blue-200">Total Usulan</div>
                 <div className="text-base font-extrabold text-white font-mono">
-                  {klkList.length} Mahasiswa
+                  {dosenRoleScopedList.length} Mahasiswa
                 </div>
               </div>
               <div className="bg-amber-400/20 px-3 py-2 rounded-xl border border-amber-300/30 text-right">
                 <div className="text-[10px] text-amber-200">Perlu Persetujuan</div>
                 <div className="text-base font-extrabold text-amber-300 font-mono">
-                  {klkList.filter((k) => k.statusVerifikasiDosen !== 'Disetujui Dosen' && k.status !== 'Disetujui / Sedang Berjalan' && k.status !== 'Ditolak').length} Berkas
+                  {dosenRoleScopedList.filter((k) => k.statusVerifikasiDosen !== 'Disetujui Dosen' && k.status !== 'Disetujui / Sedang Berjalan' && k.status !== 'Ditolak').length} Berkas
                 </div>
               </div>
             </div>
@@ -14004,14 +14018,14 @@ ${instansiMitra}
                     const isActive = dosenStatusFilter === st;
                     const count =
                       st === 'Semua'
-                        ? klkList.length
+                        ? dosenRoleScopedList.length
                         : st === 'Disetujui Dosen'
-                        ? klkList.filter((k) => k.statusVerifikasiDosen === 'Disetujui Dosen' || k.status === 'Disetujui / Sedang Berjalan').length
+                        ? dosenRoleScopedList.filter((k) => k.statusVerifikasiDosen === 'Disetujui Dosen' || k.status === 'Disetujui / Sedang Berjalan').length
                         : st === 'Perlu Revisi'
-                        ? klkList.filter((k) => k.statusVerifikasiDosen === 'Perlu Revisi').length
+                        ? dosenRoleScopedList.filter((k) => k.statusVerifikasiDosen === 'Perlu Revisi').length
                         : st === 'Ditolak'
-                        ? klkList.filter((k) => k.statusVerifikasiDosen === 'Ditolak' || k.status === 'Ditolak').length
-                        : klkList.filter((k) => k.statusVerifikasiDosen !== 'Disetujui Dosen' && k.status !== 'Disetujui / Sedang Berjalan' && k.status !== 'Ditolak' && k.statusVerifikasiDosen !== 'Perlu Revisi').length;
+                        ? dosenRoleScopedList.filter((k) => k.statusVerifikasiDosen === 'Ditolak' || k.status === 'Ditolak').length
+                        : dosenRoleScopedList.filter((k) => k.statusVerifikasiDosen !== 'Disetujui Dosen' && k.status !== 'Disetujui / Sedang Berjalan' && k.status !== 'Ditolak' && k.statusVerifikasiDosen !== 'Perlu Revisi').length;
 
                     return (
                       <button
@@ -14214,7 +14228,7 @@ ${instansiMitra}
                               <div className="truncate flex items-center gap-1">
                                 <UserCheck className="w-3 h-3 text-[#002B49] shrink-0" />
                                 <span className="truncate">
-                                  DPA: <strong className="text-slate-900">{mahasiswaList.find((m) => m.id === item.mahasiswaId || (item.nim && m.nim && m.nim.replace(/\D/g, '') === item.nim.replace(/\D/g, '')))?.dosenPANama || item.dpaNama || 'Dr. Dra. Hermin Sulistyarti, M.Si'}</strong>
+                                  DPA: <strong className="text-slate-900">{mahasiswaList.find((m) => m.id === item.mahasiswaId || (item.nim && m.nim && m.nim.replace(/\D/g, '') === item.nim.replace(/\D/g, '')))?.dosenPANama || item.dpaNama || 'Belum Ditentukan'}</strong>
                                 </span>
                               </div>
                               {checkIsDosenPAForStudent(effectiveUser, item, mahasiswaList) ? (
@@ -17376,7 +17390,15 @@ ${instansiMitra}
                 </div>
                 <div>
                   <label className="text-slate-500 block text-[11px]">Dosen PA (Pembimbing Akademik)</label>
-                  <div className="font-bold text-slate-900 mt-0.5 text-xs">{currentStudentData.dosenPANama}</div>
+                  <div className="font-bold text-slate-900 mt-0.5 text-xs">
+                    {currentStudentData.dosenPANama ? (
+                      currentStudentData.dosenPANama
+                    ) : (
+                      <span className="text-rose-600">
+                        Belum Ditetapkan (Admin perlu mengisi DPA di SDM → Mahasiswa agar form tampil di Dosen PA)
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
