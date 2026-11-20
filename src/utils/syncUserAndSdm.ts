@@ -596,18 +596,24 @@ export const syncUserAccountToSdm = (
     );
 
     if (existingPblIdx >= 0) {
+      const existingPbl = pblList[existingPblIdx];
+      const existingMitra = (existingPbl.namaMitra || '').trim().toLowerCase();
+      const hasPlaceholderMitra = !existingMitra || existingMitra === 'instansi / mitra industri klk';
       const updated = [...pblList];
       updated[existingPblIdx] = {
-        ...updated[existingPblIdx],
+        ...existingPbl,
         nama: cleanNamaOnly,
         gelar: parsedUser.gelar,
-        idMitra: formattedMitraId || updated[existingPblIdx].idMitra,
-        email: user.email || updated[existingPblIdx].email,
-        telepon: user.noHp !== undefined ? user.noHp : updated[existingPblIdx].telepon,
-        namaMitra: userUnit || updated[existingPblIdx].namaMitra,
-        jabatan: userJabatan || updated[existingPblIdx].jabatan,
+        idMitra: formattedMitraId || existingPbl.idMitra,
+        email: user.email || existingPbl.email,
+        telepon: user.noHp !== undefined ? user.noHp : existingPbl.telepon,
+        namaMitra: (userUnit && (userUnit.toLowerCase() !== 'instansi / mitra industri klk' || hasPlaceholderMitra))
+          ? userUnit
+          : existingPbl.namaMitra,
+        jabatan: userJabatan || existingPbl.jabatan,
         status: user.status === 'Aktif' ? 'Aktif' : 'Nonaktif',
-        username: user.username
+        username: user.username,
+        userUid: user.ownerUid || existingPbl.userUid
       };
       return { newPembimbingLapanganList: updated };
     } else {
@@ -992,9 +998,36 @@ export const syncBidirectionalUsersAndSdm = (
             status: u.status === 'Aktif' ? 'Aktif' : 'Nonaktif',
             jumlahMahasiswaBimbingan: 1,
             alamatInstansi: userUnit || 'Mitra Industri Tempat KLK',
-            username: u.username
+            username: u.username,
+            userUid: u.ownerUid
           };
           updatedPembimbingLapangan.unshift(newPbl);
+        } else {
+          const existingPbl = updatedPembimbingLapangan[existingIdx];
+          const existingMitra = (existingPbl.namaMitra || '').trim().toLowerCase();
+          const hasPlaceholderMitra = !existingMitra || existingMitra === 'instansi / mitra industri klk';
+          const cleanUserUnit = userUnit.trim();
+          const isValidUserUnit =
+            cleanUserUnit.length > 0 && cleanUserUnit.toLowerCase() !== 'instansi / mitra industri klk';
+
+          if (
+            (hasPlaceholderMitra && isValidUserUnit) ||
+            (!existingPbl.userUid && u.ownerUid) ||
+            (!existingPbl.username && u.username) ||
+            (!existingPbl.email && u.email)
+          ) {
+            updatedPembimbingLapangan[existingIdx] = {
+              ...existingPbl,
+              namaMitra: hasPlaceholderMitra && isValidUserUnit ? cleanUserUnit : existingPbl.namaMitra,
+              alamatInstansi:
+                (!existingPbl.alamatInstansi || existingPbl.alamatInstansi.trim().toLowerCase() === 'mitra industri tempat klk') && isValidUserUnit
+                  ? cleanUserUnit
+                  : existingPbl.alamatInstansi,
+              userUid: existingPbl.userUid || u.ownerUid,
+              username: existingPbl.username || u.username,
+              email: existingPbl.email || u.email
+            };
+          }
         }
       } else if (isPlpCandidate) {
         const existingIdx = updatedPlp.findIndex(

@@ -58,7 +58,12 @@ import {
   isImageFile,
   isPdfFile
 } from '../utils/suratBalasanMitraHelpers';
-import { extractUidFromSdmOrUser } from '../utils/firestoreSync';
+import {
+  extractUidFromSdmOrUser,
+  areCompaniesEquivalent,
+  isPlaceholderMitra
+} from '../utils/firestoreSync';
+import { UserAccountItem } from '../data/userList';
 import { PdfCanvasViewer } from './PdfCanvasViewer';
 import {
   Briefcase,
@@ -3196,6 +3201,7 @@ interface KlkViewProps {
   mahasiswaList?: Mahasiswa[];
   dosenList: Dosen[];
   pembimbingLapanganList?: PembimbingLapanganStaff[];
+  userList?: UserAccountItem[];
   klkList: PengajuanKLK[];
   mitraList: MitraIndustriKLK[];
   dokumenList: DokumenPanduanKLK[];
@@ -3237,6 +3243,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
   mahasiswaList = [],
   dosenList,
   pembimbingLapanganList = [],
+  userList = [],
   klkList,
   mitraList,
   dokumenList,
@@ -3260,6 +3267,22 @@ export const KlkView: React.FC<KlkViewProps> = ({
     } catch {}
     return null;
   }, [currentUser]);
+
+  const getEffectivePblMitra = (p: PembimbingLapanganStaff): string => {
+    if (!isPlaceholderMitra(p.namaMitra)) return p.namaMitra;
+    const pUid = extractUidFromSdmOrUser(p, userList, ['eksternal']);
+    const matchedUser = userList.find(
+      (u) =>
+        u.role === 'eksternal' &&
+        ((pUid && (u.ownerUid === pUid || u.id === pUid)) ||
+          (p.email && u.email && u.email.trim().toLowerCase() === p.email.trim().toLowerCase()) ||
+          (p.username && u.username && u.username.trim().toLowerCase() === p.username.trim().toLowerCase()))
+    );
+    if (matchedUser?.unit && !isPlaceholderMitra(matchedUser.unit)) {
+      return matchedUser.unit;
+    }
+    return p.namaMitra || '';
+  };
 
   const isMahasiswa = isMahasiswaRole(currentRole);
   // Hak akses pengelolaan Status KLK & QR Sosialisasi: Super Admin dan Admin (TU)
@@ -3442,7 +3465,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
   const roleScopedKlkList = useMemo(() => {
     let rawList = klkList;
     if (isUserEksternal) {
-      const mentorName = (effectiveUser?.nama || currentUser?.name || '').toLowerCase().trim();
+      const mentorName = (effectiveUser?.nama || (currentUser as unknown as { name?: string })?.name || '').toLowerCase().trim();
       const mentorEmail = (effectiveUser?.email || currentUser?.email || '').toLowerCase().trim();
       const mentorUsername = (effectiveUser?.username || '').toLowerCase().trim();
       const mentorIdentifier = (effectiveUser?.identifier || '').toLowerCase().trim();
@@ -3450,7 +3473,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
 
       const matched = klkList.filter((item) => {
         if (!item) return false;
-        const userOwnerUid = (effectiveUser as unknown as { ownerUid?: string } | null)?.ownerUid;
+        const userOwnerUid = effectiveUser?.ownerUid;
         if (
           item.pembimbingLapanganUid &&
           ((effectiveUser?.id && item.pembimbingLapanganUid === effectiveUser.id) ||
@@ -3466,7 +3489,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
         if (mentorIdentifier && kEmail && (mentorIdentifier === kEmail || kEmail.includes(mentorIdentifier))) return true;
         if (mentorUsername && kEmail && (mentorUsername === kEmail || kEmail.includes(mentorUsername))) return true;
         if (mentorName && kMentor && (mentorName.includes(kMentor) || kMentor.includes(mentorName))) return true;
-        if (mentorUnit && kMitra && (mentorUnit.includes(kMitra) || kMitra.includes(mentorUnit))) return true;
+        if (mentorUnit && kMitra && (mentorUnit.includes(kMitra) || kMitra.includes(mentorUnit) || areCompaniesEquivalent(mentorUnit, kMitra))) return true;
         return false;
       });
       // Hanya tampilkan data mahasiswa bimbingan yang cocok dengan akun user eksternal
@@ -3914,8 +3937,8 @@ export const KlkView: React.FC<KlkViewProps> = ({
           : dpaName
       );
 
-      const matchedPbl = pembimbingLapanganList.find((p) => {
-        const pUid = extractUidFromSdmOrUser(p, undefined, ['eksternal']);
+      let matchedPbl = pembimbingLapanganList.find((p) => {
+        const pUid = extractUidFromSdmOrUser(p, userList, ['eksternal']);
         if (selectedVerifikasiKlk.pembimbingLapanganUid && pUid && pUid === selectedVerifikasiKlk.pembimbingLapanganUid) {
           return true;
         }
@@ -3928,9 +3951,17 @@ export const KlkView: React.FC<KlkViewProps> = ({
         }
         return false;
       });
+      if (!matchedPbl && !selectedVerifikasiKlk.pembimbingLapanganUid && selectedVerifikasiKlk.namaMitra) {
+        const mitraMatched = pembimbingLapanganList.filter((p) =>
+          areCompaniesEquivalent(getEffectivePblMitra(p), selectedVerifikasiKlk.namaMitra)
+        );
+        if (mitraMatched.length === 1) {
+          matchedPbl = mitraMatched[0];
+        }
+      }
       setVerifikasiPembimbingLapanganId(matchedPbl ? matchedPbl.id : '');
     }
-  }, [selectedVerifikasiKlkId, selectedVerifikasiKlk, mahasiswaList, pembimbingLapanganList, isEditingAdminDecision]);
+  }, [selectedVerifikasiKlkId, selectedVerifikasiKlk, mahasiswaList, pembimbingLapanganList, userList, isEditingAdminDecision]);
 
   // Handler Verifikasi Pengajuan KLK oleh Super Admin & Admin
   const handleUpdateStatusVerifikasi = (
@@ -3979,7 +4010,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
 
     const selectedPblObj = pembimbingLapanganList.find((p) => p.id === verifikasiPembimbingLapanganId);
     const resolvedPblUid = selectedPblObj
-      ? extractUidFromSdmOrUser(selectedPblObj, undefined, ['eksternal'])
+      ? extractUidFromSdmOrUser(selectedPblObj, userList, ['eksternal'])
       : selectedVerifikasiKlk.pembimbingLapanganUid || '';
     const resolvedMentorName = selectedPblObj?.nama || selectedVerifikasiKlk.mentorIndustri;
     const resolvedMentorHp = selectedPblObj?.telepon || selectedVerifikasiKlk.noHpMentor;
@@ -4003,9 +4034,16 @@ export const KlkView: React.FC<KlkViewProps> = ({
       tahap: 'Tahap 3: Verifikasi Admin TU & Penerbitan Surat Tugas'
     };
 
+    const persistedStatus: StatusKLK =
+      newStatus === 'Disetujui' &&
+      (selectedVerifikasiKlk.status === 'Disetujui / Sedang Berjalan' ||
+        selectedVerifikasiKlk.status === 'Selesai & Dinilai')
+        ? selectedVerifikasiKlk.status
+        : newStatus;
+
     const updatedItem: PengajuanKLK = {
       ...selectedVerifikasiKlk,
-      status: newStatus,
+      status: persistedStatus,
       catatanVerifikasi: note,
       dosenPembimbingKLK: assignedDosenKlk,
       isDosenKLKDitetapkanAdmin: newStatus === 'Disetujui' ? true : selectedVerifikasiKlk.isDosenKLKDitetapkanAdmin,
@@ -4024,13 +4062,13 @@ export const KlkView: React.FC<KlkViewProps> = ({
           : selectedVerifikasiKlk.suratPengantarTerkirimKeMahasiswa,
       waktuKirimSuratPengantarKeMahasiswa:
         newStatus === 'Disetujui'
-          ? waktuNow
+          ? (selectedVerifikasiKlk.waktuKirimSuratPengantarKeMahasiswa || waktuNow)
           : newStatus === 'Ditolak'
           ? undefined
           : selectedVerifikasiKlk.waktuKirimSuratPengantarKeMahasiswa,
       suratPengantarPengirim:
         newStatus === 'Disetujui'
-          ? entryAdmin.namaAktor
+          ? (selectedVerifikasiKlk.suratPengantarPengirim || entryAdmin.namaAktor)
           : selectedVerifikasiKlk.suratPengantarPengirim,
       riwayatAktivitas: [entryAdmin, ...existingRiwayat]
     };
@@ -4040,15 +4078,16 @@ export const KlkView: React.FC<KlkViewProps> = ({
       saveCustomSuratPengantarForKlk(updatedItem.id, suratFinalData);
     }
 
-    const idx = klkList.findIndex((k) => k.id === updatedItem.id);
-    if (idx !== -1) {
-      klkList[idx] = updatedItem;
-    }
-
     if (onUpdateKLK) {
       onUpdateKLK(updatedItem);
-    } else if (onUpdateStatus) {
-      onUpdateStatus(updatedItem.id, newStatus, nomorTugasBaru);
+    } else {
+      const idx = klkList.findIndex((k) => k.id === updatedItem.id);
+      if (idx !== -1) {
+        klkList[idx] = updatedItem;
+      }
+      if (onUpdateStatus) {
+        onUpdateStatus(updatedItem.id, persistedStatus, nomorTugasBaru);
+      }
     }
 
     if (newStatus === 'Disetujui') {
@@ -4116,13 +4155,13 @@ export const KlkView: React.FC<KlkViewProps> = ({
       riwayatAktivitas: [entryGanti, ...existingRiwayat]
     };
 
-    const idx = klkList.findIndex((k) => k.id === updatedItem.id);
-    if (idx !== -1) {
-      klkList[idx] = updatedItem;
-    }
-
     if (onUpdateKLK) {
       onUpdateKLK(updatedItem);
+    } else {
+      const idx = klkList.findIndex((k) => k.id === updatedItem.id);
+      if (idx !== -1) {
+        klkList[idx] = updatedItem;
+      }
     }
 
     setVerifikasiToastMessage(
@@ -4139,7 +4178,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
     if (!selectedVerifikasiKlk) return;
 
     const selectedPbl = pembimbingLapanganList.find((p) => p.id === verifikasiPembimbingLapanganId);
-    const nextUid = selectedPbl ? extractUidFromSdmOrUser(selectedPbl, undefined, ['eksternal']) : '';
+    const nextUid = selectedPbl ? extractUidFromSdmOrUser(selectedPbl, userList, ['eksternal']) : '';
     const waktuNow = formatTanggalJamWib();
     const existingRiwayat = getOrInitRiwayatKlk(selectedVerifikasiKlk);
 
@@ -4172,13 +4211,13 @@ export const KlkView: React.FC<KlkViewProps> = ({
       riwayatAktivitas: [entryPbl, ...existingRiwayat]
     };
 
-    const idx = klkList.findIndex((k) => k.id === updatedItem.id);
-    if (idx !== -1) {
-      klkList[idx] = updatedItem;
-    }
-
     if (onUpdateKLK) {
       onUpdateKLK(updatedItem);
+    } else {
+      const idx = klkList.findIndex((k) => k.id === updatedItem.id);
+      if (idx !== -1) {
+        klkList[idx] = updatedItem;
+      }
     }
 
     setVerifikasiToastMessage(
@@ -4794,17 +4833,17 @@ export const KlkView: React.FC<KlkViewProps> = ({
       riwayatAktivitas: [entryDosen, ...existingRiwayat]
     };
 
-    // Mutasi referensi array lokal langsung agar terlihat seketika
-    const idx = klkList.findIndex((k) => k.id === updatedItem.id);
-    if (idx !== -1) {
-      klkList[idx] = updatedItem;
-    }
-
     // Panggil handler simpan state utama tanpa menimpa dengan onUpdateStatus yang menggunakan closure lama
     if (onUpdateKLK) {
       onUpdateKLK(updatedItem);
-    } else if (onUpdateStatus) {
-      onUpdateStatus(updatedItem.id, newKlkStatus, updatedItem.nomorSuratTugas);
+    } else {
+      const idx = klkList.findIndex((k) => k.id === updatedItem.id);
+      if (idx !== -1) {
+        klkList[idx] = updatedItem;
+      }
+      if (onUpdateStatus) {
+        onUpdateStatus(updatedItem.id, newKlkStatus, updatedItem.nomorSuratTugas);
+      }
     }
 
     if (keputusan === 'Disetujui Dosen') {
@@ -5202,13 +5241,14 @@ export const KlkView: React.FC<KlkViewProps> = ({
       riwayatAktivitas: [entryRespon, ...existingRiwayat]
     };
 
-    const idx = klkList.findIndex((k) => k.id === updatedItem.id);
-    if (idx !== -1) klkList[idx] = updatedItem;
-
     if (onUpdateKLK) {
       onUpdateKLK(updatedItem);
-    } else if (onUpdateStatus) {
-      onUpdateStatus(updatedItem.id, newKlkStatus, updatedItem.nomorSuratTugas);
+    } else {
+      const idx = klkList.findIndex((k) => k.id === updatedItem.id);
+      if (idx !== -1) klkList[idx] = updatedItem;
+      if (onUpdateStatus) {
+        onUpdateStatus(updatedItem.id, newKlkStatus, updatedItem.nomorSuratTugas);
+      }
     }
 
     if (respon === 'Diterima') {
@@ -5293,13 +5333,14 @@ export const KlkView: React.FC<KlkViewProps> = ({
       riwayatAktivitas: [entrySuratBalasan, ...existingRiwayat]
     };
 
-    const idx = klkList.findIndex((k) => k.id === updatedItem.id);
-    if (idx !== -1) klkList[idx] = updatedItem;
-
     if (onUpdateKLK) {
       onUpdateKLK(updatedItem);
-    } else if (onUpdateStatus) {
-      onUpdateStatus(updatedItem.id, 'Disetujui / Sedang Berjalan', updatedItem.nomorSuratTugas);
+    } else {
+      const idx = klkList.findIndex((k) => k.id === updatedItem.id);
+      if (idx !== -1) klkList[idx] = updatedItem;
+      if (onUpdateStatus) {
+        onUpdateStatus(updatedItem.id, 'Disetujui / Sedang Berjalan', updatedItem.nomorSuratTugas);
+      }
     }
 
     setSuratBalasanIsSubmitting(false);
@@ -5324,7 +5365,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
     const activeDosen =
       targetKlk.dosenPembimbingKLK && !targetKlk.dosenPembimbingKLK.includes('Belum Ditetapkan')
         ? targetKlk.dosenPembimbingKLK
-        : (effectiveUser?.name || targetKlk.dpaNama || 'Dosen Pembimbing KLK');
+        : (effectiveUser?.nama || (effectiveUser as unknown as { name?: string })?.name || targetKlk.dpaNama || 'Dosen Pembimbing KLK');
 
     const isApproved = statusKeputusan === 'Disetujui';
 
@@ -5368,13 +5409,14 @@ export const KlkView: React.FC<KlkViewProps> = ({
       riwayatAktivitas: [...newEntries, ...existingRiwayat]
     };
 
-    const idx = klkList.findIndex((k) => k.id === updatedItem.id);
-    if (idx !== -1) klkList[idx] = updatedItem;
-
     if (onUpdateKLK) {
       onUpdateKLK(updatedItem);
-    } else if (onUpdateStatus) {
-      onUpdateStatus(updatedItem.id, updatedItem.status, updatedItem.nomorSuratTugas);
+    } else {
+      const idx = klkList.findIndex((k) => k.id === updatedItem.id);
+      if (idx !== -1) klkList[idx] = updatedItem;
+      if (onUpdateStatus) {
+        onUpdateStatus(updatedItem.id, updatedItem.status, updatedItem.nomorSuratTugas);
+      }
     }
 
     setIsSubmittingVerifikasiSuratMitra(false);
@@ -8942,12 +8984,12 @@ ${instansiMitra}
     }
 
     const matchedEditPbl = pembimbingLapanganList.find((p) => {
-      const pUid = extractUidFromSdmOrUser(p, undefined, ['eksternal']);
+      const pUid = extractUidFromSdmOrUser(p, userList, ['eksternal']);
       if (editKlkForm.pembimbingLapanganUid && pUid && pUid === editKlkForm.pembimbingLapanganUid) return true;
       return Boolean(p.nama && editKlkForm.mentorIndustri && p.nama.trim().toLowerCase() === editKlkForm.mentorIndustri.trim().toLowerCase());
     });
     const resolvedEditPblUid = matchedEditPbl
-      ? extractUidFromSdmOrUser(matchedEditPbl, undefined, ['eksternal'])
+      ? extractUidFromSdmOrUser(matchedEditPbl, userList, ['eksternal'])
       : editKlkForm.pembimbingLapanganUid || '';
 
     const updatedItem: PengajuanKLK = {
@@ -8974,15 +9016,16 @@ ${instansiMitra}
 
     setDetailModalKlk(updatedItem);
 
-    const idx = klkList.findIndex((k) => k.id === updatedItem.id);
-    if (idx !== -1) {
-      klkList[idx] = updatedItem;
-    }
-
     if (onUpdateKLK) {
       onUpdateKLK(updatedItem);
-    } else if (onUpdateStatus) {
-      onUpdateStatus(updatedItem.id, editKlkForm.status);
+    } else {
+      const idx = klkList.findIndex((k) => k.id === updatedItem.id);
+      if (idx !== -1) {
+        klkList[idx] = updatedItem;
+      }
+      if (onUpdateStatus) {
+        onUpdateStatus(updatedItem.id, editKlkForm.status);
+      }
     }
 
     setModalSaveMessage(`Data Pendaftaran KLK berhasil diperbarui! Status ditetapkan: ${editKlkForm.status}`);
@@ -9010,15 +9053,16 @@ ${instansiMitra}
 
     setDetailModalKlk(updatedItem);
 
-    const idx = klkList.findIndex((k) => k.id === updatedItem.id);
-    if (idx !== -1) {
-      klkList[idx] = updatedItem;
-    }
-
     if (onUpdateKLK) {
       onUpdateKLK(updatedItem);
-    } else if (onUpdateStatus) {
-      onUpdateStatus(updatedItem.id, mappedStatus);
+    } else {
+      const idx = klkList.findIndex((k) => k.id === updatedItem.id);
+      if (idx !== -1) {
+        klkList[idx] = updatedItem;
+      }
+      if (onUpdateStatus) {
+        onUpdateStatus(updatedItem.id, mappedStatus);
+      }
     }
 
     setModalSaveMessage(`Status Pengajuan KLK berhasil diperbarui menjadi "${newStatus === 'Disetujui' ? 'Diterima' : newStatus}"!`);
@@ -11499,6 +11543,52 @@ ${instansiMitra}
                     </div>
                   </div>
 
+                  {/* Alert Banner: Pembimbing Lapangan (User Eksternal) Belum Tertaut */}
+                  {!selectedVerifikasiKlk.pembimbingLapanganUid && (
+                    <div
+                      id="banner-alert-pbl-belum-tertaut"
+                      className="p-4 bg-amber-50 border border-amber-300 rounded-xl space-y-2.5 text-xs text-amber-950 shadow-2xs"
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                        <div className="space-y-1">
+                          <div className="font-extrabold text-amber-950">
+                            Pembimbing Lapangan (User Eksternal) Belum Tertaut ke Akun Mitra
+                          </div>
+                          <p className="text-[11px] text-amber-900 leading-relaxed">
+                            Mahasiswa <strong>{selectedVerifikasiKlk.mahasiswaNama}</strong> ({selectedVerifikasiKlk.namaMitra}) belum akan muncul pada <strong>Tahap 8 (Tab Aktivitas Pembimbing Lapangan)</strong> di portal User Eksternal sampai akun pembimbing lapangannya ditautkan di bawah ini.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center pt-1">
+                        <select
+                          aria-label="Pilih Akun User Eksternal Cepat"
+                          value={verifikasiPembimbingLapanganId}
+                          onChange={(e) => setVerifikasiPembimbingLapanganId(e.target.value)}
+                          className="flex-1 p-2 border border-amber-300 rounded-lg text-xs font-bold bg-white text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-amber-600"
+                        >
+                          <option value="">-- Pilih Akun User Eksternal ({pembimbingLapanganList.length} Akun) --</option>
+                          {pembimbingLapanganList.map((p) => {
+                            const effMitra = getEffectivePblMitra(p);
+                            return (
+                              <option key={p.id} value={p.id}>
+                                {p.nama}{effMitra ? ` — ${effMitra}` : ''}{p.email || p.username ? ` (${p.email || p.username})` : ''}
+                              </option>
+                            );
+                          })}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={handleSaveAssignPembimbingLapanganInVerifikasi}
+                          className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg text-xs transition shadow-2xs cursor-pointer flex items-center justify-center gap-1.5 shrink-0"
+                        >
+                          <Link2 className="w-3.5 h-3.5" />
+                          <span>Simpan &amp; Tautkan Sekarang</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* KONTEN LENGKAP HASIL INPUT DARI TAB FORM PENGAJUAN KLK */}
                   <div className="space-y-4 text-xs text-slate-700">
                     {/* 1. Data Mahasiswa Pemohon KLK */}
@@ -11796,11 +11886,14 @@ ${instansiMitra}
                             className="flex-1 p-2.5 border border-slate-300 rounded-lg text-xs font-bold bg-white text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-emerald-600 shadow-2xs"
                           >
                             <option value="">-- Pilih Akun User Eksternal Terdaftar ({pembimbingLapanganList.length} Akun) --</option>
-                            {pembimbingLapanganList.map((p) => (
-                              <option key={p.id} value={p.id}>
-                                {p.nama}{p.namaMitra ? ` — ${p.namaMitra}` : ''}{p.email || p.username ? ` (${p.email || p.username})` : ''}
-                              </option>
-                            ))}
+                            {pembimbingLapanganList.map((p) => {
+                              const effMitra = getEffectivePblMitra(p);
+                              return (
+                                <option key={p.id} value={p.id}>
+                                  {p.nama}{effMitra ? ` — ${effMitra}` : ''}{p.email || p.username ? ` (${p.email || p.username})` : ''}
+                                </option>
+                              );
+                            })}
                           </select>
 
                           <button
@@ -12891,6 +12984,15 @@ ${instansiMitra}
                 <p className="text-xs text-blue-100/90 mt-1 max-w-2xl leading-relaxed">
                   Supervisi mahasiswa magang KLK di instansi mitra, pemantauan dan validasi logbook mingguan riset/laboratorium, evaluasi capaian kerja industri, serta penilaian kinerja lapangan (Bobot 40%).
                 </p>
+                {isUserEksternal && effectiveUser && (
+                  <div className="mt-2 inline-flex flex-wrap items-center gap-2 px-2.5 py-1 rounded-lg bg-white/10 border border-white/15 text-[11px] text-blue-50">
+                    <UserCheck className="w-3.5 h-3.5 text-[#D4AF37]" />
+                    <span>
+                      Akun Eksternal Aktif: <strong className="text-white">{effectiveUser.nama}</strong> ({effectiveUser.username})
+                      {effectiveUser.unit ? ` — ${effectiveUser.unit}` : ''}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 

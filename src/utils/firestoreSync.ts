@@ -209,6 +209,7 @@ export async function resolveOrCreateAuthUserFromGoogle(
 
       return {
         id: clampStr(data.id || uid, 128),
+        ownerUid: clampStr(data.ownerUid || uid, 128),
         username: clampStr(data.username || email, 100),
         nama: clampStr(data.nama || firebaseUser.displayName || 'Pengguna SIKMA', 200),
         role: resolvedRole,
@@ -988,6 +989,49 @@ async function safeGetDocState(docRef: DocumentReference): Promise<{
   }
 }
 
+export const isPlaceholderMitra = (raw?: string): boolean => {
+  const s = (raw || '').trim().toLowerCase();
+  return (
+    !s ||
+    s === '-' ||
+    s === 'instansi / mitra industri klk' ||
+    s === 'mitra industri tempat klk' ||
+    s === 'instansi / perusahaan mitra'
+  );
+};
+
+export const normalizeCompanyName = (raw?: string): string => {
+  if (!raw || isPlaceholderMitra(raw)) return '';
+  return raw
+    .toLowerCase()
+    .replace(/\b(pt|cv|ud|fa|tbk|persero|inc|ltd|corp|co|company|perusahaan|instansi|mitra|industri|indonesia|ind)\b\.?/gi, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const extractEmailOrgToken = (email?: string): string => {
+  const e = (email || '').trim().toLowerCase();
+  const atIdx = e.indexOf('@');
+  if (atIdx < 0) return '';
+  const host = e.slice(atIdx + 1);
+  const firstLabel = host.split('.')[0]?.replace(/[^a-z0-9]/g, '') || '';
+  const genericHosts = new Set(['gmail', 'yahoo', 'ymail', 'outlook', 'hotmail', 'live', 'icloud', 'ub', 'sikma', 'mail', 'proton']);
+  if (!firstLabel || firstLabel.length < 4 || genericHosts.has(firstLabel)) return '';
+  return firstLabel;
+};
+
+export const areCompaniesEquivalent = (a?: string, b?: string): boolean => {
+  const n1 = normalizeCompanyName(a);
+  const n2 = normalizeCompanyName(b);
+  if (!n1 || !n2) return false;
+  if (n1 === n2) return true;
+  if (n1.length >= 4 && n2.length >= 4 && (n1.includes(n2) || n2.includes(n1))) return true;
+  const c1 = n1.replace(/\s+/g, '');
+  const c2 = n2.replace(/\s+/g, '');
+  return c1.length >= 4 && c2.length >= 4 && (c1 === c2 || c1.includes(c2) || c2.includes(c1));
+};
+
 export function enrichKlkUids(
   item: PengajuanKLK,
   ctx: {
@@ -1045,7 +1089,9 @@ export function enrichKlkUids(
   const mentorName = isPlaceholderMentorName(rawMentorName) ? '' : rawMentorName;
   const mentorEmail = (item.emailMentor || '').trim().toLowerCase();
   const mentorKontak = (item.kontakMentor || '').trim().toLowerCase();
-  const mitraName = (item.namaMitra || '').trim().toLowerCase();
+  const mitraName = (item.namaMitra || '').trim();
+  const normMitra = normalizeCompanyName(mitraName);
+  const compactMitra = normMitra.replace(/\s+/g, '');
 
   const matchedPbl = pembimbingLapanganList.find((p) => {
     const pEmail = (p.email || '').trim().toLowerCase();
@@ -1077,17 +1123,45 @@ export function enrichKlkUids(
     });
     resolvedPbl = extractUidFromSdmOrUser(eksternalUser, userList, ['eksternal']);
   }
-  if (!resolvedPbl && mitraName) {
-    const mitraCandidates = pembimbingLapanganList.filter(
-      (p) =>
-        p.namaMitra &&
-        p.namaMitra.trim().toLowerCase() !== 'instansi / mitra industri klk' &&
-        (p.namaMitra.trim().toLowerCase() === mitraName || p.namaMitra.trim().toLowerCase().includes(mitraName))
-    );
-    if (mitraCandidates.length === 1) {
-      resolvedPbl = extractUidFromSdmOrUser(mitraCandidates[0], userList, ['eksternal']);
+
+  // Fallback by company / organization name & corporate email domain ONLY when pembimbingLapanganUid is not yet set
+  if (!resolvedPbl && !pembimbingLapanganUid && normMitra) {
+    const candidateUids = new Set<string>();
+
+    for (const p of pembimbingLapanganList) {
+      const pUid = extractUidFromSdmOrUser(p, userList, ['eksternal']);
+      if (!pUid) continue;
+      const matchingUser = userList.find(
+        (u) => u.role === 'eksternal' && (u.ownerUid === pUid || u.id === pUid || (p.email && u.email?.toLowerCase() === p.email.toLowerCase()))
+      );
+      const effectivePblMitra = !isPlaceholderMitra(p.namaMitra) ? p.namaMitra : (matchingUser?.unit || '');
+      const emailDomainToken = extractEmailOrgToken(p.email || matchingUser?.email);
+      if (
+        areCompaniesEquivalent(effectivePblMitra, mitraName) ||
+        (emailDomainToken && compactMitra.length >= 4 && (compactMitra.includes(emailDomainToken) || emailDomainToken.includes(compactMitra)))
+      ) {
+        candidateUids.add(pUid);
+      }
+    }
+
+    for (const u of userList) {
+      if (u.role !== 'eksternal') continue;
+      const uUid = extractUidFromSdmOrUser(u, userList, ['eksternal']);
+      if (!uUid) continue;
+      const emailDomainToken = extractEmailOrgToken(u.email);
+      if (
+        areCompaniesEquivalent(u.unit, mitraName) ||
+        (emailDomainToken && compactMitra.length >= 4 && (compactMitra.includes(emailDomainToken) || emailDomainToken.includes(compactMitra)))
+      ) {
+        candidateUids.add(uUid);
+      }
+    }
+
+    if (candidateUids.size === 1) {
+      resolvedPbl = Array.from(candidateUids)[0];
     }
   }
+
   if (resolvedPbl) {
     pembimbingLapanganUid = resolvedPbl;
   }
@@ -1817,6 +1891,7 @@ export async function resolveOrCreateAuthUserFromEmailPassword(
 
   return {
     id: uid,
+    ownerUid: clampStr(matched.ownerUid || fbUid, 128),
     username: clampStr(matched.username || email.split('@')[0], 100),
     nama: clampStr(matched.nama || 'Pengguna SIKMA', 200),
     role: resolvedRole,
@@ -1951,6 +2026,7 @@ export async function resolveAuthenticatedUserProfile(
 
     return {
       id: foundDocSnap.id,
+      ownerUid: clampStr(data.ownerUid || fbUid, 128),
       username: clampStr(data.username || fbEmail.split('@')[0] || fbUid, 100),
       nama: clampStr(data.nama || firebaseUser.displayName || 'Pengguna SIKMA', 200),
       role: resolvedRole,

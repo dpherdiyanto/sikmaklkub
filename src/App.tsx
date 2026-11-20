@@ -11,6 +11,7 @@ import {
   subscribeSikmaCollections,
   syncKlkListToFirestore,
   enrichKlkUids,
+  isPlaceholderMitra,
   syncUsersListToFirestore,
   syncSdmCategoryToFirestore,
   syncLogbooksToFirestore,
@@ -621,7 +622,22 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
   useEffect(() => {
     if (!isAuthReady || !firebaseUser || !currentUser) return;
     if (!remoteMetaRef.current.readyCollections.has('klk_submissions')) return;
-    if (klkRemoteApplyRef.current && !pendingLocalKlkSyncRef.current) {
+
+    const enrichedKlkList = klkList.map((item) =>
+      enrichKlkUids(item, { dosenList, pembimbingLapanganList, mahasiswaList, userList })
+    );
+    const hasUidEnrichmentChange =
+      isAdminUser &&
+      enrichedKlkList.some((e, i) => {
+        const orig = klkList[i];
+        return (
+          e.pembimbingLapanganUid !== orig?.pembimbingLapanganUid ||
+          e.assignedDosenUid !== orig?.assignedDosenUid ||
+          e.assignedDpaUid !== orig?.assignedDpaUid
+        );
+      });
+
+    if (klkRemoteApplyRef.current && !pendingLocalKlkSyncRef.current && !hasUidEnrichmentChange) {
       klkRemoteApplyRef.current = false;
       return;
     }
@@ -630,9 +646,10 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     const shouldAllowDeletes = isAdminUser && allowKlkDeletesRef.current;
     allowKlkDeletesRef.current = false;
 
-    const enrichedKlkList = klkList.map((item) =>
-      enrichKlkUids(item, { dosenList, pembimbingLapanganList, mahasiswaList, userList })
-    );
+    if (hasUidEnrichmentChange) {
+      setKlkList(enrichedKlkList);
+    }
+
     void syncKlkListToFirestore(
       enrichedKlkList,
       firebaseUser,
@@ -701,6 +718,58 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
       isAdminUser
     ).catch((err) => console.error('Sync PLP error:', err));
   }, [plpList, isAuthReady, firebaseUser, currentUser, currentRole]);
+
+  useEffect(() => {
+    if (!isAuthReady || !firebaseUser || !currentUser || !isAdminUser) return;
+    if (
+      !remoteMetaRef.current.readyCollections.has('sdm_directory') ||
+      !remoteMetaRef.current.readyCollections.has('users')
+    ) {
+      return;
+    }
+    const eksternalUsers = userList.filter((u) => u.role === 'eksternal');
+    if (eksternalUsers.length === 0 || pembimbingLapanganList.length === 0) return;
+
+    let changed = false;
+    const nextPblList = pembimbingLapanganList.map((p) => {
+      const matchedUser = eksternalUsers.find((u) => {
+        if (p.userUid && u.ownerUid && p.userUid === u.ownerUid) return true;
+        if (p.id && u.ownerUid && p.id === `pbl-${u.ownerUid}`) return true;
+        if (p.id && u.id && p.id === `pbl-${u.id}`) return true;
+        if (p.email && u.email && p.email.trim().toLowerCase() === u.email.trim().toLowerCase()) return true;
+        if (p.username && u.username && p.username.trim().toLowerCase() === u.username.trim().toLowerCase()) return true;
+        return isNameMatch(p.nama, u.nama);
+      });
+      if (!matchedUser) return p;
+
+      const userUnit = (matchedUser.unit || '').trim();
+      const shouldUpdateMitra = isPlaceholderMitra(p.namaMitra) && !isPlaceholderMitra(userUnit);
+      const shouldUpdateAlamat =
+        (!p.alamatInstansi || p.alamatInstansi.trim().toLowerCase() === 'mitra industri tempat klk') &&
+        !isPlaceholderMitra(userUnit);
+      const resolvedUid = p.userUid || matchedUser.ownerUid;
+      const shouldUpdateUid = Boolean(resolvedUid && p.userUid !== resolvedUid);
+      const shouldUpdateEmail = Boolean(!p.email && matchedUser.email);
+      const shouldUpdateUsername = Boolean(!p.username && matchedUser.username);
+
+      if (!shouldUpdateMitra && !shouldUpdateAlamat && !shouldUpdateUid && !shouldUpdateEmail && !shouldUpdateUsername) {
+        return p;
+      }
+      changed = true;
+      return {
+        ...p,
+        namaMitra: shouldUpdateMitra ? userUnit : p.namaMitra,
+        alamatInstansi: shouldUpdateAlamat ? userUnit : p.alamatInstansi,
+        userUid: resolvedUid,
+        email: p.email || matchedUser.email,
+        username: p.username || matchedUser.username
+      };
+    });
+
+    if (changed) {
+      setPembimbingLapanganList(nextPblList);
+    }
+  }, [userList, pembimbingLapanganList, isAuthReady, firebaseUser, currentUser, isAdminUser]);
 
   useEffect(() => {
     if (!isAuthReady || !firebaseUser || !currentUser || remoteApplyDepthRef.current > 0) return;
@@ -2158,6 +2227,7 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
               mahasiswaList={mahasiswaList}
               dosenList={dosenList}
               pembimbingLapanganList={pembimbingLapanganList}
+              userList={userList}
               klkList={klkList}
               mitraList={DAFTAR_MITRA_KLK}
               dokumenList={DOKUMEN_KLK_LIST}

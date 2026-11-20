@@ -221,6 +221,7 @@ export const normalizeMahasiswaRole = (
 
 export interface AuthUser {
   id: string;
+  ownerUid?: string;
   username: string;
   nama: string;
   role: UserRole;
