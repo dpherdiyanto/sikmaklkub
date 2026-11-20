@@ -58,6 +58,7 @@ import {
   isImageFile,
   isPdfFile
 } from '../utils/suratBalasanMitraHelpers';
+import { extractUidFromSdmOrUser } from '../utils/firestoreSync';
 import { PdfCanvasViewer } from './PdfCanvasViewer';
 import {
   Briefcase,
@@ -3717,6 +3718,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
   const [verifikasiToastSuccess, setVerifikasiToastSuccess] = useState<boolean>(false);
   const [verifikasiToastMessage, setVerifikasiToastMessage] = useState<string>('');
   const [verifikasiDosenPembimbingKlk, setVerifikasiDosenPembimbingKlk] = useState<string>('');
+  const [verifikasiPembimbingLapanganId, setVerifikasiPembimbingLapanganId] = useState<string>('');
   const [selectedAdminDecision, setSelectedAdminDecision] = useState<'Disetujui' | 'Ditolak'>('Disetujui');
   const [isEditingAdminDecision, setIsEditingAdminDecision] = useState<boolean>(false);
   const [suratPengantarAdminModalOpen, setSuratPengantarAdminModalOpen] = useState<boolean>(false);
@@ -3911,8 +3913,24 @@ export const KlkView: React.FC<KlkViewProps> = ({
           ? selectedVerifikasiKlk.dosenPembimbingKLK
           : dpaName
       );
+
+      const matchedPbl = pembimbingLapanganList.find((p) => {
+        const pUid = extractUidFromSdmOrUser(p, undefined, ['eksternal']);
+        if (selectedVerifikasiKlk.pembimbingLapanganUid && pUid && pUid === selectedVerifikasiKlk.pembimbingLapanganUid) {
+          return true;
+        }
+        const kEmail = (selectedVerifikasiKlk.emailMentor || '').trim().toLowerCase();
+        const kMentor = (selectedVerifikasiKlk.mentorIndustri || '').trim().toLowerCase();
+        if (kEmail && p.email && kEmail === p.email.trim().toLowerCase()) return true;
+        if (kEmail && p.username && kEmail === p.username.trim().toLowerCase()) return true;
+        if (kMentor && kMentor !== 'pembimbing lapangan mitra terkait' && p.nama && kMentor === p.nama.trim().toLowerCase()) {
+          return true;
+        }
+        return false;
+      });
+      setVerifikasiPembimbingLapanganId(matchedPbl ? matchedPbl.id : '');
     }
-  }, [selectedVerifikasiKlkId, selectedVerifikasiKlk, mahasiswaList, isEditingAdminDecision]);
+  }, [selectedVerifikasiKlkId, selectedVerifikasiKlk, mahasiswaList, pembimbingLapanganList, isEditingAdminDecision]);
 
   // Handler Verifikasi Pengajuan KLK oleh Super Admin & Admin
   const handleUpdateStatusVerifikasi = (
@@ -3959,6 +3977,17 @@ export const KlkView: React.FC<KlkViewProps> = ({
       selectedVerifikasiKlk.dosenPembimbingKLK ||
       'Dr. Dra. Hermin Sulistyarti, M.Si';
 
+    const selectedPblObj = pembimbingLapanganList.find((p) => p.id === verifikasiPembimbingLapanganId);
+    const resolvedPblUid = selectedPblObj
+      ? extractUidFromSdmOrUser(selectedPblObj, undefined, ['eksternal'])
+      : selectedVerifikasiKlk.pembimbingLapanganUid || '';
+    const resolvedMentorName = selectedPblObj?.nama || selectedVerifikasiKlk.mentorIndustri;
+    const resolvedMentorHp = selectedPblObj?.telepon || selectedVerifikasiKlk.noHpMentor;
+    const resolvedMentorEmail = selectedPblObj?.email || selectedVerifikasiKlk.emailMentor;
+    const resolvedKontak = selectedPblObj
+      ? ([selectedPblObj.telepon || '', selectedPblObj.email || selectedPblObj.username || ''].map((s) => s.trim()).filter(Boolean).join(' / ') || selectedVerifikasiKlk.kontakMentor)
+      : selectedVerifikasiKlk.kontakMentor;
+
     const waktuNow = formatTanggalJamWib();
     const existingRiwayat = getOrInitRiwayatKlk(selectedVerifikasiKlk);
     const aksiAdmin = newStatus === 'Disetujui' ? 'Menyetujui & Menerbitkan Surat Pengantar & Surat Tugas' : 'Mengembalikan Pengajuan';
@@ -3981,6 +4010,11 @@ export const KlkView: React.FC<KlkViewProps> = ({
       dosenPembimbingKLK: assignedDosenKlk,
       isDosenKLKDitetapkanAdmin: newStatus === 'Disetujui' ? true : selectedVerifikasiKlk.isDosenKLKDitetapkanAdmin,
       dosenPembimbingKLKDitetapkan: newStatus === 'Disetujui' ? true : selectedVerifikasiKlk.dosenPembimbingKLKDitetapkan,
+      mentorIndustri: resolvedMentorName,
+      noHpMentor: resolvedMentorHp,
+      emailMentor: resolvedMentorEmail,
+      kontakMentor: resolvedKontak,
+      pembimbingLapanganUid: resolvedPblUid || undefined,
       nomorSuratTugas: nomorTugasBaru,
       suratPengantarTerkirimKeMahasiswa:
         newStatus === 'Disetujui'
@@ -4098,6 +4132,62 @@ export const KlkView: React.FC<KlkViewProps> = ({
     );
     setVerifikasiToastSuccess(true);
     setTimeout(() => setVerifikasiToastSuccess(false), 4500);
+  };
+
+  // Handler khusus Admin untuk menetapkan / menghubungkan Pembimbing Lapangan (User Eksternal) ke KLK
+  const handleSaveAssignPembimbingLapanganInVerifikasi = () => {
+    if (!selectedVerifikasiKlk) return;
+
+    const selectedPbl = pembimbingLapanganList.find((p) => p.id === verifikasiPembimbingLapanganId);
+    const nextUid = selectedPbl ? extractUidFromSdmOrUser(selectedPbl, undefined, ['eksternal']) : '';
+    const waktuNow = formatTanggalJamWib();
+    const existingRiwayat = getOrInitRiwayatKlk(selectedVerifikasiKlk);
+
+    const nextMentorNama = selectedPbl ? selectedPbl.nama : 'Pembimbing Lapangan Mitra Terkait';
+    const nextKontak = selectedPbl
+      ? ([selectedPbl.telepon || '', selectedPbl.email || selectedPbl.username || ''].map((s) => s.trim()).filter(Boolean).join(' / ') || '-')
+      : selectedVerifikasiKlk.kontakMentor;
+
+    const entryPbl: ItemRiwayatKLK = {
+      id: `riwayat-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      waktu: waktuNow,
+      timestamp: Date.now(),
+      role: currentRole === 'super_admin' ? 'Super Admin' : 'Admin',
+      namaAktor: effectiveUser?.nama || (currentRole === 'super_admin' ? 'Super Admin SIKMA' : 'Admin TU Kimia UB'),
+      aksi: selectedPbl ? 'Penetapan Pembimbing Lapangan (User Eksternal)' : 'Melepas Tautan Pembimbing Lapangan',
+      statusHasil: selectedPbl ? 'Pembimbing Lapangan Ditetapkan' : 'Belum Ditautkan',
+      catatan: selectedPbl
+        ? `Admin menetapkan "${selectedPbl.nama}" (${selectedPbl.email || selectedPbl.username || selectedPbl.idMitra || 'User Eksternal'}) sebagai Pembimbing Lapangan. Mahasiswa kini otomatis muncul pada Tab Aktivitas Pembimbing Lapangan (Tahap 8) di akun User Eksternal tersebut.`
+        : 'Tautan akun Pembimbing Lapangan (User Eksternal) pada pengajuan KLK ini dilepas.',
+      tahap: 'Penetapan Pembimbing Lapangan'
+    };
+
+    const updatedItem: PengajuanKLK = {
+      ...selectedVerifikasiKlk,
+      mentorIndustri: nextMentorNama,
+      noHpMentor: selectedPbl ? selectedPbl.telepon || undefined : undefined,
+      emailMentor: selectedPbl ? selectedPbl.email || undefined : undefined,
+      kontakMentor: nextKontak,
+      pembimbingLapanganUid: nextUid || undefined,
+      riwayatAktivitas: [entryPbl, ...existingRiwayat]
+    };
+
+    const idx = klkList.findIndex((k) => k.id === updatedItem.id);
+    if (idx !== -1) {
+      klkList[idx] = updatedItem;
+    }
+
+    if (onUpdateKLK) {
+      onUpdateKLK(updatedItem);
+    }
+
+    setVerifikasiToastMessage(
+      selectedPbl
+        ? `Pembimbing Lapangan resmi ditautkan ke akun User Eksternal "${selectedPbl.nama}". Aktivitas, logbook, dan absensi mahasiswa kini tampil secara real-time di Tahap 8 (Tab Aktivitas Pembimbing Lapangan).`
+        : 'Tautan akun Pembimbing Lapangan berhasil diperbarui.'
+    );
+    setVerifikasiToastSuccess(true);
+    setTimeout(() => setVerifikasiToastSuccess(false), 5000);
   };
 
   // State checklist berkas pengajuan KLK oleh Super Admin & Admin
@@ -5361,11 +5451,6 @@ export const KlkView: React.FC<KlkViewProps> = ({
     >
   >({});
 
-  // Item terpilih supervisi Pembimbing Lapangan
-  const selectedMentorKlk = useMemo(() => {
-    return roleScopedKlkList.find((k) => k.id === selectedMentorKlkId) || roleScopedKlkList[0] || null;
-  }, [roleScopedKlkList, selectedMentorKlkId]);
-
   // Filter daftar mahasiswa untuk Supervisi Pembimbing Lapangan
   const filteredMentorKlkList = useMemo(() => {
     return roleScopedKlkList.filter((item) => {
@@ -5396,7 +5481,26 @@ export const KlkView: React.FC<KlkViewProps> = ({
 
       return matchesSearch && matchesStatus;
     });
-  }, [klkList, mentorSearchQuery, mentorStatusFilter]);
+  }, [roleScopedKlkList, mentorSearchQuery, mentorStatusFilter]);
+
+  // Item terpilih supervisi Pembimbing Lapangan
+  const selectedMentorKlk = useMemo(() => {
+    return (
+      filteredMentorKlkList.find((k) => k.id === selectedMentorKlkId) ||
+      filteredMentorKlkList[0] ||
+      roleScopedKlkList.find((k) => k.id === selectedMentorKlkId) ||
+      roleScopedKlkList[0] ||
+      null
+    );
+  }, [filteredMentorKlkList, roleScopedKlkList, selectedMentorKlkId]);
+
+  useEffect(() => {
+    if (filteredMentorKlkList.length > 0 && !filteredMentorKlkList.some((k) => k.id === selectedMentorKlkId)) {
+      setSelectedMentorKlkId(filteredMentorKlkList[0].id);
+    } else if (filteredMentorKlkList.length === 0 && roleScopedKlkList.length > 0 && !roleScopedKlkList.some((k) => k.id === selectedMentorKlkId)) {
+      setSelectedMentorKlkId(roleScopedKlkList[0].id);
+    }
+  }, [filteredMentorKlkList, roleScopedKlkList, selectedMentorKlkId]);
 
   // Handler: Verifikasi Logbook Mingguan oleh Pembimbing Lapangan
   const handleValidateLogbookMentor = (
@@ -5537,6 +5641,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
   const [formAlamatMitra, setFormAlamatMitra] = useState('');
   const [formBidangPekerjaan, setFormBidangPekerjaan] = useState('');
   const [formMentor, setFormMentor] = useState('');
+  const [formPembimbingLapanganUid, setFormPembimbingLapanganUid] = useState('');
   const [formKontakMentor, setFormKontakMentor] = useState('');
   const [formHpPembimbing, setFormHpPembimbing] = useState('');
   const [formEmailPembimbing, setFormEmailPembimbing] = useState('');
@@ -5787,6 +5892,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
     tanggalSelesai: string;
     dosenPembimbingKLK: string;
     mentorIndustri: string;
+    pembimbingLapanganUid: string;
     kontakMentor: string;
     semester: number;
     status: 'Diproses' | 'Disetujui' | 'Ditolak';
@@ -5800,6 +5906,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
     tanggalSelesai: '',
     dosenPembimbingKLK: '',
     mentorIndustri: '',
+    pembimbingLapanganUid: '',
     kontakMentor: '',
     semester: 6,
     status: 'Diproses'
@@ -8745,6 +8852,7 @@ ${instansiMitra}
       tanggalSelesai: item.tanggalSelesai || '',
       dosenPembimbingKLK: item.dosenPembimbingKLK || 'Belum Ditetapkan (Akan Ditetapkan Admin TU pada Tahap 3)',
       mentorIndustri: item.mentorIndustri || '',
+      pembimbingLapanganUid: item.pembimbingLapanganUid || '',
       kontakMentor: item.kontakMentor || '',
       semester: item.semester || 6,
       status: initialStatus
@@ -8833,6 +8941,15 @@ ${instansiMitra}
       updatedVersiForm = [...updatedVersiForm, archivedSnapshot];
     }
 
+    const matchedEditPbl = pembimbingLapanganList.find((p) => {
+      const pUid = extractUidFromSdmOrUser(p, undefined, ['eksternal']);
+      if (editKlkForm.pembimbingLapanganUid && pUid && pUid === editKlkForm.pembimbingLapanganUid) return true;
+      return Boolean(p.nama && editKlkForm.mentorIndustri && p.nama.trim().toLowerCase() === editKlkForm.mentorIndustri.trim().toLowerCase());
+    });
+    const resolvedEditPblUid = matchedEditPbl
+      ? extractUidFromSdmOrUser(matchedEditPbl, undefined, ['eksternal'])
+      : editKlkForm.pembimbingLapanganUid || '';
+
     const updatedItem: PengajuanKLK = {
       ...detailModalKlk,
       namaMitra: editKlkForm.namaMitra,
@@ -8844,6 +8961,9 @@ ${instansiMitra}
       tanggalSelesai: editKlkForm.tanggalSelesai,
       dosenPembimbingKLK: editKlkForm.dosenPembimbingKLK,
       mentorIndustri: editKlkForm.mentorIndustri,
+      pembimbingLapanganUid: resolvedEditPblUid || undefined,
+      emailMentor: matchedEditPbl?.email || detailModalKlk.emailMentor,
+      noHpMentor: matchedEditPbl?.telepon || detailModalKlk.noHpMentor,
       kontakMentor: editKlkForm.kontakMentor,
       semester: Number(editKlkForm.semester),
       status: editKlkForm.status,
@@ -9132,6 +9252,7 @@ ${instansiMitra}
         setFormTglMulai('');
         setFormTglSelesai('');
         setFormMentor('');
+        setFormPembimbingLapanganUid('');
         setFormKontakMentor('');
         setFormHpPembimbing('');
         setFormEmailPembimbing('');
@@ -9147,6 +9268,7 @@ ${instansiMitra}
       if (latestSubmittedKlk.skema) setFormSkema(latestSubmittedKlk.skema);
       if (latestSubmittedKlk.namaSemester) setFormSemester(latestSubmittedKlk.namaSemester);
       if (latestSubmittedKlk.mentorIndustri) setFormMentor(latestSubmittedKlk.mentorIndustri);
+      setFormPembimbingLapanganUid(latestSubmittedKlk.pembimbingLapanganUid || '');
       if (latestSubmittedKlk.kontakMentor) setFormKontakMentor(latestSubmittedKlk.kontakMentor);
       if (latestSubmittedKlk.noHpMentor) setFormHpPembimbing(latestSubmittedKlk.noHpMentor);
       if (latestSubmittedKlk.emailMentor) setFormEmailPembimbing(latestSubmittedKlk.emailMentor);
@@ -9420,6 +9542,16 @@ ${instansiMitra}
         alamatMitra: formAlamatMitra || 'Kantor Pusat / Fasilitas Pabrik Mitra',
         bidangPekerjaan: formBidangPekerjaan,
         mentorIndustri: formMentor || 'Pembimbing Lapangan Mitra Terkait',
+        pembimbingLapanganUid:
+          formPembimbingLapanganUid ||
+          extractUidFromSdmOrUser(
+            pembimbingLapanganList.find(
+              (p) => p.nama && formMentor && p.nama.trim().toLowerCase() === formMentor.trim().toLowerCase()
+            ),
+            undefined,
+            ['eksternal']
+          ) ||
+          undefined,
         kontakMentor: activeKontakMentor,
         noHpMentor: formHpPembimbing.trim() || undefined,
         emailMentor: formEmailPembimbing.trim() || undefined,
@@ -9557,6 +9689,16 @@ ${instansiMitra}
       alamatMitra: formAlamatMitra || 'Kantor Pusat / Fasilitas Pabrik Mitra',
       bidangPekerjaan: formBidangPekerjaan,
       mentorIndustri: formMentor || 'Pembimbing Lapangan Mitra Terkait',
+      pembimbingLapanganUid:
+        formPembimbingLapanganUid ||
+        extractUidFromSdmOrUser(
+          pembimbingLapanganList.find(
+            (p) => p.nama && formMentor && p.nama.trim().toLowerCase() === formMentor.trim().toLowerCase()
+          ),
+          undefined,
+          ['eksternal']
+        ) ||
+        undefined,
       kontakMentor: activeKontakMentor,
       noHpMentor: formHpPembimbing.trim() || undefined,
       emailMentor: formEmailPembimbing.trim() || undefined,
@@ -10319,9 +10461,9 @@ ${instansiMitra}
             >
               <Briefcase className="w-4 h-4 text-[#D4AF37]" />
               <span>Aktivitas Pembimbing Lapangan</span>
-              {klkList.filter((k) => (k.logbooks || []).some((lb) => lb.statusVerifikasi === 'Menunggu Verifikasi' || !lb.statusVerifikasi)).length > 0 && (
+              {roleScopedKlkList.filter((k) => (k.logbooks || []).some((lb) => lb.statusVerifikasi === 'Menunggu Verifikasi' || !lb.statusVerifikasi)).length > 0 && (
                 <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-400 text-slate-950">
-                  {klkList.filter((k) => (k.logbooks || []).some((lb) => lb.statusVerifikasi === 'Menunggu Verifikasi' || !lb.statusVerifikasi)).length}
+                  {roleScopedKlkList.filter((k) => (k.logbooks || []).some((lb) => lb.statusVerifikasi === 'Menunggu Verifikasi' || !lb.statusVerifikasi)).length}
                 </span>
               )}
             </button>
@@ -11624,15 +11766,57 @@ ${instansiMitra}
                       </div>
                     </div>
 
-                    {/* 6. Pembimbing Lapangan & Dosen Pembimbing KLK (Departemen Kimia) */}
+                    {/* 6. Pembimbing Lapangan (User Eksternal) & Dosen Pembimbing KLK (Departemen Kimia) */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
-                        <label className="font-semibold text-slate-700 block mb-1.5 text-xs">
-                          Nama Pembimbing Lapangan
-                        </label>
-                        <div className="p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 shadow-2xs">
-                          {selectedVerifikasiKlk.mentorIndustri || '-'}
+                      <div className="p-4 bg-emerald-50/70 rounded-xl border border-emerald-200 space-y-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="font-bold text-slate-800 block text-xs">
+                            Penetapan Pembimbing Lapangan (User Eksternal)
+                          </label>
+                          {selectedVerifikasiKlk.pembimbingLapanganUid ? (
+                            <span className="text-[10px] font-bold bg-emerald-600 text-white px-2 py-0.5 rounded shrink-0">
+                              Terhubung Eksternal
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-bold bg-amber-500 text-slate-950 px-2 py-0.5 rounded shrink-0">
+                              Belum Tertaut
+                            </span>
+                          )}
                         </div>
+
+                        <div className="text-[11px] text-slate-700 bg-white px-2.5 py-1.5 rounded-lg border border-emerald-200">
+                          Isian Saat Ini: <strong>{selectedVerifikasiKlk.mentorIndustri || '-'}</strong>
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                          <select
+                            id="select-verifikasi-pembimbing-lapangan"
+                            value={verifikasiPembimbingLapanganId}
+                            onChange={(e) => setVerifikasiPembimbingLapanganId(e.target.value)}
+                            className="flex-1 p-2.5 border border-slate-300 rounded-lg text-xs font-bold bg-white text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-emerald-600 shadow-2xs"
+                          >
+                            <option value="">-- Pilih Akun User Eksternal Terdaftar ({pembimbingLapanganList.length} Akun) --</option>
+                            {pembimbingLapanganList.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.nama}{p.namaMitra ? ` — ${p.namaMitra}` : ''}{p.email || p.username ? ` (${p.email || p.username})` : ''}
+                              </option>
+                            ))}
+                          </select>
+
+                          <button
+                            type="button"
+                            id="btn-tetapkan-pembimbing-lapangan"
+                            onClick={handleSaveAssignPembimbingLapanganInVerifikasi}
+                            className="px-3.5 py-2.5 bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white font-bold rounded-lg text-xs transition shadow-2xs cursor-pointer flex items-center justify-center gap-1.5 shrink-0"
+                          >
+                            <Save className="w-3.5 h-3.5 text-[#D4AF37]" />
+                            <span>Tetapkan Pembimbing Lapangan</span>
+                          </button>
+                        </div>
+
+                        <p className="text-[11px] text-slate-600 leading-relaxed">
+                          Tautkan akun <strong>User Eksternal</strong> dari daftar di atas agar mahasiswa ini muncul otomatis pada <strong>Tahap 8 (Tab Aktivitas Pembimbing Lapangan)</strong> untuk validasi logbook, checklist absensi harian, dan penilaian industri (40%). Penetapan ini dapat diperbarui kapan saja oleh Admin TU.
+                        </p>
                       </div>
 
                       <div className="p-4 bg-blue-50/70 rounded-xl border border-blue-200 space-y-2.5">
@@ -12714,19 +12898,19 @@ ${instansiMitra}
             <div className="flex items-center gap-2 flex-wrap shrink-0">
               <div className="bg-white/10 backdrop-blur-xs px-3 py-2 rounded-xl border border-white/10 text-center min-w-20">
                 <div className="text-[10px] text-blue-200 uppercase font-bold tracking-wider">Mahasiswa</div>
-                <div className="text-base font-extrabold text-[#D4AF37]">{klkList.length}</div>
+                <div className="text-base font-extrabold text-[#D4AF37]">{roleScopedKlkList.length}</div>
               </div>
               <div className="bg-white/10 backdrop-blur-xs px-3 py-2 rounded-xl border border-white/10 text-center min-w-20">
                 <div className="text-[10px] text-blue-200 uppercase font-bold tracking-wider">Mitra Aktif</div>
                 <div className="text-base font-extrabold text-white">
-                  {new Set(klkList.map((k) => k.namaMitra)).size}
+                  {new Set(roleScopedKlkList.map((k) => k.namaMitra)).size}
                 </div>
               </div>
               <div className="bg-white/10 backdrop-blur-xs px-3 py-2 rounded-xl border border-white/10 text-center min-w-20">
                 <div className="text-[10px] text-blue-200 uppercase font-bold tracking-wider">Logbook Pending</div>
                 <div className="text-base font-extrabold text-amber-300">
                   {
-                    klkList.flatMap((k) => k.logbooks || []).filter(
+                    roleScopedKlkList.flatMap((k) => k.logbooks || []).filter(
                       (lb) => lb.statusVerifikasi === 'Menunggu Verifikasi' || !lb.statusVerifikasi
                     ).length
                   }
@@ -12801,10 +12985,18 @@ ${instansiMitra}
               {/* List of Students */}
               <div className="space-y-2 max-h-[620px] overflow-y-auto pr-1">
                 {filteredMentorKlkList.length === 0 ? (
-                  <div className="p-6 text-center text-slate-400 space-y-1 bg-slate-50 rounded-xl">
+                  <div className="p-6 text-center text-slate-400 space-y-1.5 bg-slate-50 rounded-xl border border-dashed border-slate-200">
                     <User className="w-7 h-7 mx-auto text-slate-300" />
-                    <p className="text-xs font-semibold text-slate-600">Tidak ada mahasiswa yang cocok</p>
-                    <p className="text-[11px]">Coba ubah kata kunci pencarian atau filter status.</p>
+                    <p className="text-xs font-semibold text-slate-700">
+                      {isUserEksternal && roleScopedKlkList.length === 0
+                        ? 'Belum ada mahasiswa KLK yang ditautkan ke akun Anda'
+                        : 'Tidak ada mahasiswa yang cocok'}
+                    </p>
+                    <p className="text-[11px] leading-relaxed text-slate-500">
+                      {isUserEksternal && roleScopedKlkList.length === 0
+                        ? 'Pastikan Mahasiswa memilih nama Anda di Form Pengajuan KLK atau Admin TU menetapkan akun User Eksternal Anda pada Tahap 3 (Verifikasi Pengajuan KLK).'
+                        : 'Coba ubah kata kunci pencarian atau filter status.'}
+                    </p>
                   </div>
                 ) : (
                   filteredMentorKlkList.map((item) => {
@@ -17892,6 +18084,72 @@ ${instansiMitra}
 
             {/* Pembimbing Lapangan */}
             <div className="space-y-4">
+              {pembimbingLapanganList.length > 0 && (
+                <div className="p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <label className="font-bold text-slate-800 text-xs">
+                      Pilih Akun Pembimbing Lapangan Terdaftar (User Eksternal)
+                    </label>
+                    {formPembimbingLapanganUid ? (
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-600 text-white">
+                        Terhubung ke Portal User Eksternal
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300">
+                        Opsional / Isi Manual di Bawah
+                      </span>
+                    )}
+                  </div>
+                  <select
+                    id="select-form-pembimbing-lapangan"
+                    value={
+                      pembimbingLapanganList.find(
+                        (p) =>
+                          (formPembimbingLapanganUid &&
+                            extractUidFromSdmOrUser(p, undefined, ['eksternal']) === formPembimbingLapanganUid) ||
+                          (p.nama && formMentor && p.nama.trim().toLowerCase() === formMentor.trim().toLowerCase())
+                      )?.id || ''
+                    }
+                    onChange={(e) => {
+                      const chosenId = e.target.value;
+                      if (!chosenId) {
+                        setFormPembimbingLapanganUid('');
+                        return;
+                      }
+                      const matchedPbl = pembimbingLapanganList.find((p) => p.id === chosenId);
+                      if (matchedPbl) {
+                        const resolvedUid = extractUidFromSdmOrUser(matchedPbl, undefined, ['eksternal']);
+                        setFormPembimbingLapanganUid(resolvedUid);
+                        setFormMentor(matchedPbl.nama || '');
+                        if (!formMitra.trim() && matchedPbl.namaMitra && matchedPbl.namaMitra !== 'Instansi / Mitra Industri KLK') {
+                          setFormMitra(matchedPbl.namaMitra);
+                        }
+                        if (!formAlamatMitra.trim() && matchedPbl.alamatInstansi) {
+                          setFormAlamatMitra(matchedPbl.alamatInstansi);
+                        }
+                        if (matchedPbl.telepon) setFormHpPembimbing(matchedPbl.telepon);
+                        if (matchedPbl.email) setFormEmailPembimbing(matchedPbl.email);
+                        const kontakParts = [matchedPbl.telepon || '', matchedPbl.email || matchedPbl.username || '']
+                          .map((s) => s.trim())
+                          .filter(Boolean);
+                        setFormKontakMentor(kontakParts.join(' / '));
+                      }
+                    }}
+                    className="w-full p-2.5 bg-white border border-emerald-300 rounded-lg focus:ring-2 focus:ring-emerald-600 text-xs font-semibold text-slate-900"
+                  >
+                    <option value="">-- Ketik Manual / Pilih Nanti oleh Admin TU --</option>
+                    {pembimbingLapanganList.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.nama}{p.namaMitra ? ` — ${p.namaMitra}` : ''}{p.username ? ` (${p.username})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-600 leading-relaxed">
+                    Memilih akun dari daftar di atas memastikan pembimbing lapangan Anda langsung dapat menyetujui logbook &amp; checklist absensi harian di <strong>Tahap 8</strong>. Jika belum tersedia, Anda tetap dapat mengetik manual dan Admin TU akan menautkannya di Tahap 3.
+                  </p>
+                </div>
+              )}
+
               <div>
                 <label className="font-semibold text-slate-700 block mb-1.5">
                   Nama Pembimbing Lapangan
@@ -17907,6 +18165,7 @@ ${instansiMitra}
                       (p) => p.nama && p.nama.trim().toLowerCase() === nextVal.trim().toLowerCase()
                     );
                     if (matchedPbl) {
+                      setFormPembimbingLapanganUid(extractUidFromSdmOrUser(matchedPbl, undefined, ['eksternal']));
                       if (!formMitra.trim() && matchedPbl.namaMitra) setFormMitra(matchedPbl.namaMitra);
                       if (!formAlamatMitra.trim() && matchedPbl.alamatInstansi) setFormAlamatMitra(matchedPbl.alamatInstansi);
                       if (matchedPbl.telepon) setFormHpPembimbing(matchedPbl.telepon);
@@ -17915,6 +18174,8 @@ ${instansiMitra}
                         .map((s) => s.trim())
                         .filter(Boolean);
                       if (kontakParts.length > 0) setFormKontakMentor(kontakParts.join(' / '));
+                    } else {
+                      setFormPembimbingLapanganUid('');
                     }
                   }}
                   placeholder="Nama & Jabatan Pembimbing Lapangan Mitra"
@@ -23074,14 +23335,69 @@ ${instansiMitra}
 
                     <div>
                       <label className="font-bold text-slate-700 block mb-1">
-                        Nama Pembimbing Lapangan <span className="text-red-500">*</span>
+                        Nama Pembimbing Lapangan (User Eksternal) <span className="text-red-500">*</span>
                       </label>
+                      {pembimbingLapanganList.length > 0 && (
+                        <select
+                          value={
+                            pembimbingLapanganList.find(
+                              (p) =>
+                                (editKlkForm.pembimbingLapanganUid &&
+                                  extractUidFromSdmOrUser(p, undefined, ['eksternal']) === editKlkForm.pembimbingLapanganUid) ||
+                                (p.nama &&
+                                  editKlkForm.mentorIndustri &&
+                                  p.nama.trim().toLowerCase() === editKlkForm.mentorIndustri.trim().toLowerCase())
+                            )?.id || ''
+                          }
+                          onChange={(e) => {
+                            const matched = pembimbingLapanganList.find((p) => p.id === e.target.value);
+                            if (matched) {
+                              const nextUid = extractUidFromSdmOrUser(matched, undefined, ['eksternal']);
+                              const nextKontak = [matched.telepon || '', matched.email || matched.username || '']
+                                .map((s) => s.trim())
+                                .filter(Boolean)
+                                .join(' / ');
+                              setEditKlkForm({
+                                ...editKlkForm,
+                                mentorIndustri: matched.nama,
+                                pembimbingLapanganUid: nextUid,
+                                kontakMentor: nextKontak || editKlkForm.kontakMentor || '-'
+                              });
+                            } else {
+                              setEditKlkForm({
+                                ...editKlkForm,
+                                pembimbingLapanganUid: ''
+                              });
+                            }
+                          }}
+                          className="w-full p-2 mb-1.5 border border-emerald-300 bg-emerald-50/50 rounded-lg text-xs font-bold text-slate-900 focus:ring-2 focus:ring-emerald-600"
+                        >
+                          <option value="">-- Tautkan Akun User Eksternal Terdaftar --</option>
+                          {pembimbingLapanganList.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.nama}{p.namaMitra ? ` — ${p.namaMitra}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      )}
                       <input
                         type="text"
                         list="datalist-pembimbing-lapangan-edit"
                         required
                         value={editKlkForm.mentorIndustri}
-                        onChange={(e) => setEditKlkForm({ ...editKlkForm, mentorIndustri: e.target.value })}
+                        onChange={(e) => {
+                          const nextVal = e.target.value;
+                          const matched = pembimbingLapanganList.find(
+                            (p) => p.nama && p.nama.trim().toLowerCase() === nextVal.trim().toLowerCase()
+                          );
+                          setEditKlkForm({
+                            ...editKlkForm,
+                            mentorIndustri: nextVal,
+                            pembimbingLapanganUid: matched
+                              ? extractUidFromSdmOrUser(matched, undefined, ['eksternal'])
+                              : ''
+                          });
+                        }}
                         placeholder="Contoh: Dr. Ir. Budi Santoso, M.T."
                         className="w-full p-2 border border-slate-300 rounded-lg text-xs font-semibold focus:ring-2 focus:ring-[#002B49]"
                       />

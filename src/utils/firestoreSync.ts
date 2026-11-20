@@ -879,7 +879,19 @@ export function subscribeSikmaCollections(
 }
 
 const AUTH_UID_REGEX = /^[A-Za-z0-9]{20,}$/;
-const SDM_UID_PREFIX_REGEX = /^(?:dos|mhs|adm|plp|pbl)-([A-Za-z0-9]{20,})$/;
+const SDM_UID_PREFIX_REGEX = /^(?:(?:dosen|mahasiswa|admin|plp|pembimbing_lapangan)_)?(?:dos|mhs|adm|plp|pbl)-([A-Za-z0-9]{20,})$/;
+
+const isPlaceholderMentorName = (val?: string): boolean => {
+  const norm = String(val || '').trim().toLowerCase();
+  return (
+    !norm ||
+    norm === '-' ||
+    norm === 'tbd' ||
+    norm === 'pembimbing lapangan mitra terkait' ||
+    norm === 'pembimbing lapangan mitra' ||
+    norm.startsWith('belum ditetapkan')
+  );
+};
 
 const normalizeTitleFreeName = (val?: string): string =>
   String(val || '')
@@ -939,7 +951,16 @@ export function extractUidFromSdmOrUser(
     }
   }
   if (typeof entity.ownerUid === 'string' && AUTH_UID_REGEX.test(entity.ownerUid.trim())) {
-    return entity.ownerUid.trim();
+    const ownerTrim = entity.ownerUid.trim();
+    if (!allowedRoles) {
+      return ownerTrim;
+    }
+    if (users.length > 0) {
+      const ownerUser = users.find((u) => u.id === ownerTrim || u.ownerUid === ownerTrim);
+      if (ownerUser && allowedRoles.includes(ownerUser.role)) {
+        return ownerTrim;
+      }
+    }
   }
   return '';
 }
@@ -1020,7 +1041,8 @@ export function enrichKlkUids(
   }
 
   // 3. Resolve Pembimbing Lapangan / Eksternal UID
-  const mentorName = (item.mentorIndustri || '').trim();
+  const rawMentorName = (item.mentorIndustri || '').trim();
+  const mentorName = isPlaceholderMentorName(rawMentorName) ? '' : rawMentorName;
   const mentorEmail = (item.emailMentor || '').trim().toLowerCase();
   const mentorKontak = (item.kontakMentor || '').trim().toLowerCase();
   const mitraName = (item.namaMitra || '').trim().toLowerCase();
@@ -1057,7 +1079,10 @@ export function enrichKlkUids(
   }
   if (!resolvedPbl && mitraName) {
     const mitraCandidates = pembimbingLapanganList.filter(
-      (p) => p.namaMitra && (p.namaMitra.trim().toLowerCase() === mitraName || p.namaMitra.trim().toLowerCase().includes(mitraName))
+      (p) =>
+        p.namaMitra &&
+        p.namaMitra.trim().toLowerCase() !== 'instansi / mitra industri klk' &&
+        (p.namaMitra.trim().toLowerCase() === mitraName || p.namaMitra.trim().toLowerCase().includes(mitraName))
     );
     if (mitraCandidates.length === 1) {
       resolvedPbl = extractUidFromSdmOrUser(mitraCandidates[0], userList, ['eksternal']);
@@ -1071,7 +1096,7 @@ export function enrichKlkUids(
     ...item,
     ...(assignedDpaUid ? { assignedDpaUid } : {}),
     ...(assignedDosenUid ? { assignedDosenUid } : {}),
-    ...(pembimbingLapanganUid ? { pembimbingLapanganUid } : {})
+    pembimbingLapanganUid: pembimbingLapanganUid || undefined
   };
 }
 
