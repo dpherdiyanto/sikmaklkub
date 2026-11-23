@@ -27,6 +27,7 @@ import {
   parseNameAndGelar,
   syncUserEditAcrossAllModules
 } from '../utils/syncUserAndSdm';
+import { formatTerakhirLogin } from '../utils/lastLoginFormat';
 import {
   verifyPassword,
   hashPassword,
@@ -177,7 +178,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       jabatan: currentUser?.jabatan || fallback.jabatan,
       status: 'Aktif',
       tanggalDibuat: '-',
-      terakhirLogin: currentUser?.lastLogin || 'Baru saja',
+      terakhirLogin: formatTerakhirLogin(currentUser?.lastLogin || 'Baru saja').label,
       noHp: ''
     };
   }, [matchedUser, currentUser, currentRole]);
@@ -450,7 +451,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       avatarText,
       unit: formData.unit.trim(),
       jabatan: lockedJabatan,
-      lastLogin: currentUser?.lastLogin || matchedUser?.terakhirLogin || 'Baru saja',
+      lastLogin: currentUser?.lastLogin || (matchedUser?.terakhirLogin ? formatTerakhirLogin(matchedUser.terakhirLogin).label : 'Baru saja'),
       mustChangePassword: currentUser?.mustChangePassword,
       isFirstLogin: currentUser?.isFirstLogin,
       passwordChangedAt: currentUser?.passwordChangedAt
@@ -1172,7 +1173,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-slate-500">Login Terakhir</span>
-                  <span className="font-medium text-slate-700">{matchedUser?.terakhirLogin || 'Baru saja'}</span>
+                  <span
+                    className="font-medium text-slate-700"
+                    title={formatTerakhirLogin(matchedUser?.terakhirLogin || currentUser?.lastLogin || 'Baru saja').title}
+                  >
+                    {formatTerakhirLogin(matchedUser?.terakhirLogin || currentUser?.lastLogin || 'Baru saja').label}
+                  </span>
                 </div>
               </div>
             </div>
@@ -1525,8 +1531,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   Masuk sebagai <strong>{roleBadge.label}</strong> dengan username <span className="font-mono">{formData.username}</span>
                 </div>
               </div>
-              <span className="text-slate-400 font-mono text-[11px] whitespace-nowrap">
-                {matchedUser?.terakhirLogin || currentUser?.lastLogin || 'Baru saja'}
+              <span
+                className="text-slate-400 font-mono text-[11px] whitespace-nowrap"
+                title={formatTerakhirLogin(matchedUser?.terakhirLogin || currentUser?.lastLogin || 'Baru saja').title}
+              >
+                {formatTerakhirLogin(matchedUser?.terakhirLogin || currentUser?.lastLogin || 'Baru saja').label}
               </span>
             </div>
 

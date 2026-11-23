@@ -51,6 +51,7 @@ import {
   usernameToAuthEmail,
   ZUPER_ADMIN_EMAIL
 } from '../utils/firestoreSync';
+import { formatTerakhirLogin } from '../utils/lastLoginFormat';
 import { UserAccountItem, INITIAL_USER_ACCOUNTS, NIM_NIP_MIGRATION_FLAG, migrateUsernamesToNimNip } from '../data/userList';
 import { INITIAL_SEMESTER_LIST } from '../data/semesterList';
 import {
@@ -271,6 +272,13 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
   onUpdatePlpList,
   onUpdatePembimbingLapanganList
 }) => {
+  const [nowTick, setNowTick] = useState<Date>(() => new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowTick(new Date()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
   // State for user list with automatic migration for Prof. Hermin and Zuper Admin
   const [userList, setUserList] = useState<UserAccountItem[]>(() => {
     let source = (userListProp && userListProp.length > 0) ? userListProp : null;
@@ -2665,8 +2673,29 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
                           </button>
                         </td>
 
-                        <td className="py-3 px-4 text-slate-500 text-[11px]">
-                          {user.terakhirLogin}
+                        <td className="py-3 px-4 text-[11px]">
+                          {(() => {
+                            const formatted = formatTerakhirLogin(user.terakhirLogin, nowTick);
+                            return (
+                              <span
+                                title={formatted.title}
+                                className={`inline-flex items-center gap-1.5 ${
+                                  formatted.isToday
+                                    ? 'text-emerald-700 font-semibold'
+                                    : formatted.isYesterday
+                                    ? 'text-slate-700 font-medium'
+                                    : formatted.isNever || formatted.isLegacy
+                                    ? 'text-slate-400 italic'
+                                    : 'text-slate-600'
+                                }`}
+                              >
+                                {formatted.isToday && (
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                                )}
+                                <span>{formatted.label}</span>
+                              </span>
+                            );
+                          })()}
                         </td>
 
                         <td className="py-3 px-4 text-right">

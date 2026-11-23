@@ -22,7 +22,8 @@ import {
   isBootstrappedAdminEmail,
   markDocDeletedInMeta,
   clearDocDeletedInMeta,
-  sanitizeDocId
+  sanitizeDocId,
+  touchUserLastLoginInFirestore
 } from './utils/firestoreSync';
 import {
   ActiveTab,
@@ -162,7 +163,9 @@ export default function App() {
   const pendingLocalKlkSyncRef = useRef<boolean>(false);
   const allowKlkDeletesRef = useRef<boolean>(false);
   const [klkRemoteReadyVersion, setKlkRemoteReadyVersion] = useState<number>(0);
+  const [usersRemoteReadyVersion, setUsersRemoteReadyVersion] = useState<number>(0);
   const hasSeededCloudRef = useRef<boolean>(false);
+  const touchedSessionUidRef = useRef<string | null>(null);
 
   const applyFromRemote = (updater: () => void) => {
     remoteApplyDepthRef.current += 1;
@@ -562,6 +565,8 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
         onRemoteReady: (colName) => {
           if (colName === 'klk_submissions') {
             setKlkRemoteReadyVersion((v) => v + 1);
+          } else if (colName === 'users') {
+            setUsersRemoteReadyVersion((v) => v + 1);
           }
         }
       }
@@ -615,6 +620,28 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
       hasSeededCloudRef.current = false;
     };
   }, [isAuthReady, firebaseUser, currentUser, currentRole]);
+
+  // Touch terakhirLogin once per browser session when resuming an active auth session
+  useEffect(() => {
+    if (!isAuthReady || !firebaseUser || !currentUser || usersRemoteReadyVersion === 0) {
+      if (!firebaseUser) {
+        touchedSessionUidRef.current = null;
+      }
+      return;
+    }
+    const sessionKey = `${firebaseUser.uid}:${currentUser.id}`;
+    if (touchedSessionUidRef.current === sessionKey) return;
+    touchedSessionUidRef.current = sessionKey;
+
+    const matchedAcc = userList.find(
+      (u) => u.id === currentUser.id || (u.ownerUid && u.ownerUid === firebaseUser.uid)
+    );
+    void touchUserLastLoginInFirestore(
+      firebaseUser,
+      matchedAcc?.id || currentUser.id,
+      matchedAcc?.terakhirLogin
+    );
+  }, [isAuthReady, firebaseUser, currentUser, usersRemoteReadyVersion, userList]);
 
   // Sync local mutations to Firestore ONLY after remote initial snapshot is ready
   const isAdminUser = isBootstrappedAdminEmail(firebaseUser?.email, firebaseUser?.emailVerified) || currentRole === 'super_admin' || currentRole === 'admin';

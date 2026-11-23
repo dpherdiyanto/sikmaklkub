@@ -10,6 +10,7 @@ import {
   usernameToAuthEmail,
   ZUPER_ADMIN_EMAIL
 } from '../utils/firestoreSync';
+import { createLastLoginTimestamp } from '../utils/lastLoginFormat';
 import {
   FlaskConical,
   User,
@@ -264,13 +265,10 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
 
         // Refresh last login timestamp in localStorage cache if already present
         if (localMatched && localStorage.getItem('sikma_user_accounts')) {
-          const nowStr =
-            'Hari ini, ' +
-            new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) +
-            ' WIB';
+          const nowIso = createLastLoginTimestamp();
           const updatedAccounts = localAccounts.map((item) =>
             item.id === localMatched.id
-              ? { ...item, terakhirLogin: nowStr, mustChangePassword: authUser.mustChangePassword }
+              ? { ...item, terakhirLogin: nowIso, mustChangePassword: authUser.mustChangePassword }
               : item
           );
           localStorage.setItem('sikma_user_accounts', JSON.stringify(updatedAccounts));

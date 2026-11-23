@@ -31,6 +31,7 @@ import {
   normalizeMahasiswaRole
 } from '../types/sikma';
 import { UserAccountItem } from '../data/userList';
+import { createLastLoginTimestamp, parseLastLoginIso } from './lastLoginFormat';
 
 export const BOOTSTRAPPED_ADMIN_EMAIL = 'dp.herdiyanto@gmail.com';
 export const ZUPER_ADMIN_EMAIL = 'zuperadmin@ub.ac.id';
@@ -197,13 +198,10 @@ export async function resolveOrCreateAuthUserFromGoogle(
       const resolvedRole: UserRole = isRootAdmin
         ? 'super_admin'
         : normalizeMahasiswaRole(data.role as string, data.unit as string);
-      const nowStr =
-        'Hari ini, ' +
-        new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) +
-        ' WIB';
+      const nowIso = createLastLoginTimestamp();
 
       await updateDoc(userDocRef, {
-        terakhirLogin: clampStr(nowStr, 120),
+        terakhirLogin: clampStr(nowIso, 120),
         updatedAt: serverTimestamp()
       });
 
@@ -271,10 +269,7 @@ export async function resolveOrCreateAuthUserFromGoogle(
     300
   );
 
-  const nowStr =
-    'Hari ini, ' +
-    new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) +
-    ' WIB';
+  const nowIso = createLastLoginTimestamp();
 
   try {
     await setDoc(userDocRef, {
@@ -290,7 +285,7 @@ export async function resolveOrCreateAuthUserFromGoogle(
       jabatan,
       status: 'Aktif',
       noHp: clampStr(localMatch?.noHp || '', 40),
-      terakhirLogin: clampStr(nowStr, 120),
+      terakhirLogin: clampStr(nowIso, 120),
       mustChangePassword: false,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
@@ -1851,10 +1846,7 @@ export async function resolveOrCreateAuthUserFromEmailPassword(
   }
 
   const userDocRef = doc(db, 'users', uid);
-  const nowStr =
-    'Hari ini, ' +
-    new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) +
-    ' WIB';
+  const nowIso = createLastLoginTimestamp();
 
   const resolvedRole: UserRole = isRootAdmin ? 'super_admin' : normalizeMahasiswaRole(matched.role, matched.unit);
 
@@ -1874,14 +1866,14 @@ export async function resolveOrCreateAuthUserFromEmailPassword(
         jabatan: clampStr(matched.jabatan || '', 300),
         status: 'Aktif',
         noHp: clampStr(matched.noHp || '', 40),
-        terakhirLogin: clampStr(nowStr, 120),
+        terakhirLogin: clampStr(nowIso, 120),
         mustChangePassword: Boolean(matched.mustChangePassword),
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
     } else {
       await updateDoc(userDocRef, {
-        terakhirLogin: clampStr(nowStr, 120),
+        terakhirLogin: clampStr(nowIso, 120),
         updatedAt: serverTimestamp()
       });
     }
@@ -1923,10 +1915,7 @@ export async function resolveAuthenticatedUserProfile(
     await ensureAdminRecordIfBootstrapped(firebaseUser);
   }
 
-  const nowStr =
-    'Hari ini, ' +
-    new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) +
-    ' WIB';
+  const nowIso = createLastLoginTimestamp();
 
   let foundDocSnap = null;
 
@@ -2017,7 +2006,7 @@ export async function resolveAuthenticatedUserProfile(
     try {
       await updateDoc(foundDocSnap.ref, {
         ...(isBootstrapped && fbEmail === ZUPER_ADMIN_EMAIL && data.ownerUid !== fbUid ? { ownerUid: fbUid } : {}),
-        terakhirLogin: clampStr(nowStr, 120),
+        terakhirLogin: clampStr(nowIso, 120),
         updatedAt: serverTimestamp()
       });
     } catch (err) {
@@ -2066,7 +2055,7 @@ export async function resolveAuthenticatedUserProfile(
         jabatan: seedJabatan,
         status: 'Aktif',
         noHp: clampStr(fallbackLocalUser?.noHp || '', 40),
-        terakhirLogin: clampStr(nowStr, 120),
+        terakhirLogin: clampStr(nowIso, 120),
         mustChangePassword: false,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
@@ -2095,3 +2084,56 @@ export async function resolveAuthenticatedUserProfile(
   throw new Error('USER_NOT_FOUND_IN_FIRESTORE');
 }
 
+/**
+ * Memperbarui `terakhirLogin` pada Firestore ketika pengguna yang sudah login
+ * membuka ulang aplikasi / menyegarkan sesi (throttle minimal 5 menit).
+ */
+export async function touchUserLastLoginInFirestore(
+  firebaseUser: FirebaseUser,
+  userDocId?: string,
+  currentTerakhirLogin?: string
+): Promise<string | null> {
+  const parsed = parseLastLoginIso(currentTerakhirLogin);
+  if (parsed && Date.now() - parsed.getTime() < 5 * 60 * 1000) {
+    return null;
+  }
+
+  const fbUid = sanitizeDocId(firebaseUser.uid, 'usr');
+  const candidateId = userDocId ? sanitizeDocId(userDocId, 'usr') : fbUid;
+  const nowIso = createLastLoginTimestamp();
+
+  try {
+    const directRef = doc(db, 'users', candidateId);
+    const directSnap = await getDoc(directRef);
+    if (directSnap.exists()) {
+      const existingParsed = parseLastLoginIso(String(directSnap.data()?.terakhirLogin || ''));
+      if (existingParsed && Date.now() - existingParsed.getTime() < 5 * 60 * 1000) {
+        return null;
+      }
+      await updateDoc(directRef, {
+        terakhirLogin: clampStr(nowIso, 120),
+        updatedAt: serverTimestamp()
+      });
+      return nowIso;
+    }
+
+    const ownedSnap = await getDocs(
+      query(collection(db, 'users'), where('ownerUid', '==', fbUid), limit(1))
+    );
+    if (!ownedSnap.empty) {
+      const docSnap = ownedSnap.docs[0];
+      const existingParsed = parseLastLoginIso(String(docSnap.data()?.terakhirLogin || ''));
+      if (existingParsed && Date.now() - existingParsed.getTime() < 5 * 60 * 1000) {
+        return null;
+      }
+      await updateDoc(docSnap.ref, {
+        terakhirLogin: clampStr(nowIso, 120),
+        updatedAt: serverTimestamp()
+      });
+      return nowIso;
+    }
+  } catch (err) {
+    console.warn('Touch terakhirLogin warning:', err);
+  }
+  return null;
+}
