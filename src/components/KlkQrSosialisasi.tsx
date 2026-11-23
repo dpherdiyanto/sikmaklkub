@@ -25,27 +25,9 @@ import {
   Trash2
 } from 'lucide-react';
 import { INITIAL_MAHASISWA_LIST } from '../data/mahasiswaList.ts';
-import { Mahasiswa } from '../types/sikma';
+import { Mahasiswa, QrSosialisasiKLK, VerifiedStudentRecord } from '../types/sikma';
 
-export interface QrSosialisasiKLK {
-  id: string;
-  kode: string;
-  judul: string;
-  waktuDibuat: number; // timestamp ms
-  durasiJam: number; // e.g. 0.25, 0.5, 0.75, 1, 1.25, 1.5
-  durasiMenit?: number; // e.g. 15, 30, 45, 60, 75, 90
-  waktuKadaluarsa: number; // timestamp ms
-  dibuatOleh: string;
-  keterangan?: string;
-  status: 'Aktif' | 'Kadaluarsa' | 'Nonaktif';
-}
-
-export interface VerifiedStudentRecord {
-  nim: string;
-  nama: string;
-  kodeQr: string;
-  waktuVerifikasi: number;
-}
+export type { QrSosialisasiKLK, VerifiedStudentRecord };
 
 // Data awal QR Sosialisasi: Default ada 1 QR aktif 60 menit dan 1 QR kadaluarsa untuk pengujian
 export const INITIAL_QR_LIST: QrSosialisasiKLK[] = [
@@ -126,6 +108,8 @@ interface QrManagerModalProps {
   onSaveQrList: (newList: QrSosialisasiKLK[]) => void;
   unblockedNims: string[];
   onSaveUnblockedNims: (newNims: string[]) => void;
+  verifiedStudents?: VerifiedStudentRecord[];
+  onRemoveStudentVerification?: (nim: string) => void;
   adminName: string;
   onOpenProjector: (qr: QrSosialisasiKLK) => void;
   mahasiswaList?: Mahasiswa[];
@@ -138,6 +122,8 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
   onSaveQrList,
   unblockedNims,
   onSaveUnblockedNims,
+  verifiedStudents,
+  onRemoveStudentVerification,
   adminName,
   onOpenProjector,
   mahasiswaList = []
@@ -158,35 +144,52 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
   const [manualNimInput, setManualNimInput] = useState('');
   const [filterUnblockStatus, setFilterUnblockStatus] = useState<'Semua' | 'Terkunci' | 'Dibuka'>('Semua');
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmDeleteStudent, setConfirmDeleteStudent] = useState<{ nim: string; nama: string } | null>(null);
 
-  // Load verified students
-  const [verifiedList, setVerifiedList] = useState<VerifiedStudentRecord[]>(() => {
+  // Fallback local verified list only if parent did not pass verifiedStudents prop
+  const [localVerifiedList, setLocalVerifiedList] = useState<VerifiedStudentRecord[]>([]);
+  useEffect(() => {
+    if (verifiedStudents !== undefined || !isOpen) return;
     try {
       const saved = localStorage.getItem('sikma_klk_verified_students');
-      return saved ? JSON.parse(saved) : [];
+      setLocalVerifiedList(saved ? JSON.parse(saved) : []);
     } catch {
-      return [];
+      setLocalVerifiedList([]);
     }
-  });
+  }, [verifiedStudents, isOpen]);
 
-  // Delete student presensi & unblock record
-  const handleDeleteStudentRecord = (nim: string, nama: string) => {
+  const verifiedList = verifiedStudents !== undefined ? verifiedStudents : localVerifiedList;
+
+  // Execute delete student presensi & unblock record (triggered after inline confirmation)
+  const executeDeleteStudentRecord = (nim: string, nama: string) => {
     const cleanNim = nim.replace(/\D/g, '');
-    if (confirm(`Apakah Anda yakin ingin menghapus data status presensi & buka blokir untuk mahasiswa ${nama} (${cleanNim})?`)) {
-      // 1. Remove from unblockedNims
-      const nextUnblocked = unblockedNims.filter((n) => n !== cleanNim);
-      onSaveUnblockedNims(nextUnblocked);
+    // 1. Remove from unblockedNims
+    const nextUnblocked = unblockedNims.filter((n) => n !== cleanNim);
+    onSaveUnblockedNims(nextUnblocked);
 
-      // 2. Remove from verifiedList
+    // 2. Remove from verifiedStudents (parent & Firestore + fallback)
+    if (onRemoveStudentVerification) {
+      onRemoveStudentVerification(cleanNim);
+    } else {
       const nextVerified = verifiedList.filter((v) => v.nim.replace(/\D/g, '') !== cleanNim);
-      setVerifiedList(nextVerified);
+      setLocalVerifiedList(nextVerified);
       try {
         localStorage.setItem('sikma_klk_verified_students', JSON.stringify(nextVerified));
       } catch {}
-
-      setActionNotice(`Data status presensi & buka blokir mahasiswa ${nama} (NIM: ${cleanNim}) telah berhasil dihapus.`);
-      setTimeout(() => setActionNotice(null), 4000);
     }
+
+    setConfirmDeleteStudent(null);
+    setActionError(null);
+    setActionNotice(`Data status presensi & buka blokir mahasiswa ${nama} (NIM: ${cleanNim}) telah berhasil dihapus.`);
+    setTimeout(() => setActionNotice(null), 4000);
+  };
+
+  // Request confirmation before deleting student presensi & unblock record
+  const handleDeleteStudentRecord = (nim: string, nama: string) => {
+    const cleanNim = nim.replace(/\D/g, '');
+    setActionError(null);
+    setConfirmDeleteStudent({ nim: cleanNim, nama });
   };
 
   // Handle Generate QR Code
@@ -233,6 +236,7 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
   // Toggle Unblock for student
   const handleToggleUnblock = (nim: string, nama: string) => {
     const cleanNim = nim.replace(/\D/g, '');
+    setActionError(null);
     const isCurrentlyUnblocked = unblockedNims.includes(cleanNim);
     let next: string[];
     if (isCurrentlyUnblocked) {
@@ -249,13 +253,14 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
   // Manual Add NIM to Unblock
   const handleManualUnblock = (e: React.FormEvent) => {
     e.preventDefault();
+    setActionError(null);
     const cleanNim = manualNimInput.replace(/\D/g, '');
     if (!cleanNim || cleanNim.length < 6) {
-      alert('Masukkan NIM mahasiswa yang valid (minimal 6 digit angka).');
+      setActionError('Masukkan NIM mahasiswa yang valid (minimal 6 digit angka).');
       return;
     }
     if (unblockedNims.includes(cleanNim)) {
-      alert(`NIM ${cleanNim} sudah dalam daftar buka blokir.`);
+      setActionError(`NIM ${cleanNim} sudah berada dalam daftar Buka Blokir.`);
       return;
     }
     const next = [...unblockedNims, cleanNim];
@@ -267,14 +272,25 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
 
   // Deactivate QR
   const handleDeactivateQr = (id: string) => {
+    setActionError(null);
     const next = qrList.map((q) => (q.id === id ? { ...q, status: 'Nonaktif' as const } : q));
     onSaveQrList(next);
     setActionNotice('Status QR Code dinonaktifkan.');
     setTimeout(() => setActionNotice(null), 3000);
   };
 
+  // Reactivate QR (if not expired)
+  const handleReactivateQr = (id: string) => {
+    setActionError(null);
+    const next = qrList.map((q) => (q.id === id ? { ...q, status: 'Aktif' as const } : q));
+    onSaveQrList(next);
+    setActionNotice('Status QR Code diaktifkan kembali.');
+    setTimeout(() => setActionNotice(null), 3000);
+  };
+
   // Delete QR
   const handleDeleteQr = (id: string) => {
+    setActionError(null);
     const target = qrList.find((q) => q.id === id);
     const targetName = target ? ` "${target.judul}" (${target.kode})` : '';
     const next = qrList.filter((q) => q.id !== id);
@@ -304,7 +320,7 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
                 </span>
               </div>
               <p className="text-[11px] sm:text-xs text-slate-300 mt-0.5">
-                Departemen Kimia FSTeM UB &bull; Generate token QR presensi berbatas waktu (3 Jam / 1 Hari) & Otorisasi Buka Blokir
+                Departemen Kimia FSTeM UB &bull; Generate token QR presensi berbatas waktu (15&ndash;90 Menit) &amp; Otorisasi Buka Blokir
               </p>
             </div>
           </div>
@@ -321,9 +337,70 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
 
         {/* Action Notice */}
         {actionNotice && (
-          <div className="px-5 py-2.5 bg-emerald-50 border-b border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>{actionNotice}</span>
+          <div className="px-5 py-2.5 bg-emerald-50 border-b border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>{actionNotice}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionNotice(null)}
+              className="text-emerald-700 hover:text-emerald-900 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* Action Error */}
+        {actionError && (
+          <div className="px-5 py-2.5 bg-rose-50 border-b border-rose-200 text-rose-800 text-xs font-semibold flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{actionError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionError(null)}
+              className="text-rose-700 hover:text-rose-900 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* Inline Confirmation Delete Student Record */}
+        {confirmDeleteStudent && (
+          <div
+            id="confirm-delete-qr-student-banner"
+            className="px-5 py-3 bg-amber-50 border-b border-amber-300 text-amber-950 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+          >
+            <div className="flex items-center gap-2 font-semibold">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                Hapus status presensi QR &amp; buka blokir untuk{' '}
+                <strong>{confirmDeleteStudent.nama}</strong> (NIM:{' '}
+                <code className="font-mono font-bold">{confirmDeleteStudent.nim}</code>)?
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                id="btn-batal-hapus-qr-student"
+                onClick={() => setConfirmDeleteStudent(null)}
+                className="px-3 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg font-bold text-[11px] cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                id="btn-konfirmasi-hapus-qr-student"
+                onClick={() => executeDeleteStudentRecord(confirmDeleteStudent.nim, confirmDeleteStudent.nama)}
+                className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-bold text-[11px] cursor-pointer"
+              >
+                Ya, Hapus Status
+              </button>
+            </div>
           </div>
         )}
 
@@ -382,7 +459,7 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
                     <span>Buat Kode QR Presensi Sosialisasi Baru</span>
                   </h3>
                   <p className="text-[11px] text-slate-500 mt-0.5">
-                    Tentukan judul sosialisasi dan durasi berlakunya scan QR (misal 3 jam atau 1 hari). Mahasiswa wajib scan untuk membuka form pendaftaran.
+                    Tentukan judul sosialisasi dan durasi berlakunya scan QR (15&ndash;90 menit). Mahasiswa wajib scan atau input kode untuk membuka form pendaftaran.
                   </p>
                 </div>
 
@@ -611,8 +688,9 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
                   <tbody className="divide-y divide-slate-200">
                     {qrList.map((item, idx) => {
                       const timeInfo = formatTimeRemaining(item.waktuKadaluarsa);
+                      const isDisabled = item.status === 'Nonaktif';
                       const isExpired = timeInfo.isExpired || item.status === 'Kadaluarsa';
-                      const isActive = !isExpired && item.status === 'Aktif';
+                      const isActive = !isExpired && !isDisabled && item.status === 'Aktif';
 
                       return (
                         <tr key={item.id} className="hover:bg-slate-50/80 transition-colors">
@@ -636,8 +714,8 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
                             <div className="font-semibold text-slate-700 mt-0.5">
                               Berakhir: {new Date(item.waktuKadaluarsa).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' })}
                             </div>
-                            <div className={`text-[10px] font-bold mt-0.5 ${isActive ? 'text-emerald-700' : 'text-rose-600'}`}>
-                              {timeInfo.text}
+                            <div className={`text-[10px] font-bold mt-0.5 ${isActive ? 'text-emerald-700' : isDisabled ? 'text-amber-700' : 'text-rose-600'}`}>
+                              {isDisabled ? 'Dinonaktifkan Admin' : timeInfo.text}
                             </div>
                           </td>
                           <td className="p-3 text-center">
@@ -645,6 +723,11 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
                                 <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                                 <span>Aktif</span>
+                              </span>
+                            ) : isDisabled ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                                <Lock className="w-3 h-3 text-amber-700" />
+                                <span>Nonaktif</span>
                               </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300">
@@ -658,7 +741,7 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
                               <button
                                 type="button"
                                 onClick={() => onOpenProjector(item)}
-                                className="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-[#002B49] rounded border border-blue-200 text-[11px] font-bold flex items-center gap-1 shadow-2xs"
+                                className="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-[#002B49] rounded border border-blue-200 text-[11px] font-bold flex items-center gap-1 shadow-2xs cursor-pointer"
                                 title="Buka Tampilan QR Layar Penuh"
                               >
                                 <Maximize2 className="w-3 h-3" />
@@ -668,10 +751,20 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => handleDeactivateQr(item.id)}
-                                  className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded border border-amber-200 text-[11px] font-semibold"
+                                  className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded border border-amber-200 text-[11px] font-semibold cursor-pointer"
                                   title="Nonaktifkan QR Code"
                                 >
                                   Nonaktifkan
+                                </button>
+                              )}
+                              {isDisabled && !timeInfo.isExpired && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleReactivateQr(item.id)}
+                                  className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded border border-emerald-200 text-[11px] font-semibold cursor-pointer"
+                                  title="Aktifkan Kembali QR Code"
+                                >
+                                  Aktifkan
                                 </button>
                               )}
                               <button
@@ -770,7 +863,53 @@ export const QrManagerModal: React.FC<QrManagerModalProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
-                      {effectiveMahasiswaList.filter((m) => {
+                      {(() => {
+                        const knownNims = new Set(
+                          effectiveMahasiswaList.map((m) => m.nim.replace(/\D/g, '')).filter(Boolean)
+                        );
+                        const extraRows: Mahasiswa[] = [];
+                        const addedExtraNims = new Set<string>();
+
+                        for (const rawNim of unblockedNims) {
+                          const clean = rawNim.replace(/\D/g, '');
+                          if (clean && !knownNims.has(clean) && !addedExtraNims.has(clean)) {
+                            addedExtraNims.add(clean);
+                            const vRec = verifiedList.find((v) => v.nim.replace(/\D/g, '') === clean);
+                            extraRows.push({
+                              id: `manual-${clean}`,
+                              nim: clean,
+                              nama: vRec?.nama || `Mahasiswa (NIM Manual)`,
+                              angkatan: clean.slice(0, 2) ? `20${clean.slice(0, 2)}` : '-',
+                              programStudi: 'S1 Kimia (Input Manual)',
+                              status: 'Aktif',
+                              semester: 6,
+                              ipk: 0,
+                              totalSks: 0,
+                              tahapSkripsi: 'Belum Mengambil'
+                            });
+                          }
+                        }
+                        for (const vRec of verifiedList) {
+                          const clean = vRec.nim.replace(/\D/g, '');
+                          if (clean && !knownNims.has(clean) && !addedExtraNims.has(clean)) {
+                            addedExtraNims.add(clean);
+                            extraRows.push({
+                              id: `verified-${clean}`,
+                              nim: clean,
+                              nama: vRec.nama || `Mahasiswa (${clean})`,
+                              angkatan: clean.slice(0, 2) ? `20${clean.slice(0, 2)}` : '-',
+                              programStudi: 'S1 Kimia',
+                              status: 'Aktif',
+                              semester: 6,
+                              ipk: 0,
+                              totalSks: 0,
+                              tahapSkripsi: 'Belum Mengambil'
+                            });
+                          }
+                        }
+
+                        return [...extraRows, ...effectiveMahasiswaList];
+                      })().filter((m) => {
                         const cleanNim = m.nim.replace(/\D/g, '');
                         const query = searchMhs.trim().toLowerCase();
                         const matchText = !query || m.nama.toLowerCase().includes(query) || cleanNim.includes(query);
@@ -1034,7 +1173,8 @@ export const QrScanGate: React.FC<QrScanGateProps> = ({
         });
         setErrorMessage(
           `⚠️ KODE QR TELAH KADALUARSA! Batas waktu ${formatDurationLabel(
-            matchedQr.durasiJam
+            matchedQr.durasiJam,
+            matchedQr.durasiMenit
           )} telah berakhir pada ${expiredDate}. Kode ini sudah tidak berlaku. Jika Anda lupa melakukan scan saat sosialisasi, silakan hubungi Admin untuk membuka blokir pendaftaran Anda.`
         );
         return;
@@ -1190,7 +1330,7 @@ export const QrScanGate: React.FC<QrScanGateProps> = ({
                     setInputCode(activeQr.kode);
                     handleVerify(undefined, activeQr.kode);
                   } else {
-                    alert('Tidak ada QR aktif saat ini. Silakan generate dari akun Admin.');
+                    setErrorMessage('Tidak ada QR aktif saat ini. Silakan hubungi Administrator untuk generate QR Sosialisasi.');
                   }
                 }}
                 className="px-4 py-2 bg-[#D4AF37] hover:bg-[#c4a02d] text-[#002B49] rounded-lg font-bold text-xs flex items-center gap-1.5 shadow-sm"

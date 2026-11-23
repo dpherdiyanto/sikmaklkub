@@ -26,8 +26,10 @@ import {
   PengajuanKLK,
   Pengumuman,
   PLPStaff,
+  QrSosialisasiKLK,
   SuratPengajuan,
   UserRole,
+  VerifiedStudentRecord,
   normalizeMahasiswaRole
 } from '../types/sikma';
 import { UserAccountItem } from '../data/userList';
@@ -421,6 +423,8 @@ export interface SubscriptionCallbacks {
   onSeminarsUpdate: (items: JadwalSeminar[]) => void;
   onSuratUpdate: (items: SuratPengajuan[]) => void;
   onPengumumanUpdate: (items: Pengumuman[]) => void;
+  onKlkQrConfigUpdate?: (config: { qrList?: QrSosialisasiKLK[]; unblockedNims?: string[] }) => void;
+  onKlkQrVerificationsUpdate?: (items: VerifiedStudentRecord[]) => void;
   onRemoteReady?: (collectionName: string, count: number) => void;
 }
 
@@ -862,6 +866,63 @@ export function subscribeSikmaCollections(
       (error) => handleFirestoreError(error, OperationType.LIST, 'pengumuman')
     )
   );
+
+  // 8. System Config: KLK QR Sosialisasi & Buka Blokir
+  if (callbacks.onKlkQrConfigUpdate) {
+    const qrConfigQuery = query(collection(db, 'system_configs'), where('isConfigDoc', '==', true));
+    unsubs.push(
+      onSnapshot(
+        qrConfigQuery,
+        (snap) => {
+          const qrConfigDoc = snap.docs.find((d) => d.id === 'klk_qr_config');
+          if (qrConfigDoc) {
+            const payload = qrConfigDoc.data()?.payload;
+            if (payload && typeof payload === 'object') {
+              const rawQrList = Array.isArray(payload.qrList) ? (payload.qrList as QrSosialisasiKLK[]) : undefined;
+              const rawUnblocked = Array.isArray(payload.unblockedNims)
+                ? (payload.unblockedNims as unknown[]).map((n) => String(n || '').replace(/\D/g, '')).filter(Boolean)
+                : undefined;
+              callbacks.onKlkQrConfigUpdate?.({
+                qrList: rawQrList,
+                unblockedNims: rawUnblocked
+              });
+            }
+          }
+          callbacks.onRemoteReady?.('system_configs_klk_qr', qrConfigDoc ? 1 : 0);
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, 'system_configs')
+      )
+    );
+  }
+
+  // 9. KLK QR Student Verifications
+  if (callbacks.onKlkQrVerificationsUpdate) {
+    const qrVerQuery = isRootAdmin
+      ? collection(db, 'klk_qr_verifications')
+      : query(collection(db, 'klk_qr_verifications'), where('ownerUid', '==', uid));
+    unsubs.push(
+      onSnapshot(
+        qrVerQuery,
+        (snap) => {
+          const items: VerifiedStudentRecord[] = [];
+          snap.forEach((docSnap) => {
+            const raw = docSnap.data();
+            if (raw && raw.nim) {
+              items.push({
+                nim: clampStr(raw.nim, 60),
+                nama: clampStr(raw.nama || 'Mahasiswa', 200),
+                kodeQr: clampStr(raw.kodeQr || '-', 120),
+                waktuVerifikasi: typeof raw.waktuVerifikasi === 'number' ? raw.waktuVerifikasi : Date.now()
+              });
+            }
+          });
+          callbacks.onKlkQrVerificationsUpdate?.(items);
+          callbacks.onRemoteReady?.('klk_qr_verifications', items.length);
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, 'klk_qr_verifications')
+      )
+    );
+  }
 
   return () => {
     unsubs.forEach((fn) => {
@@ -2185,4 +2246,107 @@ export async function touchUserLastLoginInFirestore(
     console.warn('Touch terakhirLogin warning:', err);
   }
   return null;
+}
+
+export async function syncKlkQrConfigToFirestore(
+  qrList: QrSosialisasiKLK[],
+  unblockedNims: string[],
+  firebaseUser: FirebaseUser
+): Promise<void> {
+  const uid = sanitizeDocId(firebaseUser.uid, 'usr');
+  const docId = 'klk_qr_config';
+  const docRef = doc(db, 'system_configs', docId);
+  const cleanQrList = stripUndefinedDeep(qrList).slice(0, 200);
+  const cleanUnblockedNims = Array.from(
+    new Set(unblockedNims.map((n) => String(n || '').replace(/\D/g, '')).filter(Boolean))
+  ).slice(0, 1000);
+  const payloadData = {
+    qrList: cleanQrList as unknown as Record<string, unknown>[],
+    unblockedNims: cleanUnblockedNims
+  };
+
+  try {
+    const docState = await safeGetDocState(docRef);
+    if (docState.exists) {
+      await updateDoc(docRef, {
+        isConfigDoc: true,
+        payload: payloadData,
+        updatedAt: serverTimestamp()
+      });
+    } else {
+      await setDoc(docRef, {
+        id: docId,
+        ownerUid: uid,
+        isConfigDoc: true,
+        payload: payloadData,
+        updatedAt: serverTimestamp()
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `system_configs/${docId}`);
+  }
+}
+
+export async function saveStudentQrVerificationToFirestore(
+  record: VerifiedStudentRecord,
+  firebaseUser: FirebaseUser
+): Promise<void> {
+  const uid = sanitizeDocId(firebaseUser.uid, 'usr');
+  const cleanNim = String(record.nim || '').replace(/\D/g, '') || uid;
+  const docId = sanitizeDocId(`qrver_${cleanNim}`, 'qrver');
+  const docRef = doc(db, 'klk_qr_verifications', docId);
+  const fields = {
+    nim: clampStr(cleanNim, 60) || uid,
+    nama: clampStr(record.nama || 'Mahasiswa', 200) || 'Mahasiswa',
+    kodeQr: clampStr(record.kodeQr || '-', 120) || '-',
+    waktuVerifikasi: Math.round(Number(record.waktuVerifikasi) || Date.now())
+  };
+
+  try {
+    const docState = await safeGetDocState(docRef);
+    if (docState.exists) {
+      await updateDoc(docRef, {
+        ...fields,
+        updatedAt: serverTimestamp()
+      });
+    } else {
+      await setDoc(docRef, {
+        id: docId,
+        ownerUid: uid,
+        ...fields,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `klk_qr_verifications/${docId}`);
+  }
+}
+
+export async function deleteStudentQrVerificationInFirestore(nim: string): Promise<void> {
+  const cleanNim = String(nim || '').replace(/\D/g, '');
+  if (!cleanNim) return;
+  const docId = sanitizeDocId(`qrver_${cleanNim}`, 'qrver');
+  try {
+    await deleteDoc(doc(db, 'klk_qr_verifications', docId));
+  } catch {
+    // ignore if missing
+  }
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'klk_qr_verifications'), where('nim', '==', cleanNim))
+    );
+    await Promise.all(snap.docs.map((d) => deleteDoc(d.ref).catch(() => undefined)));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `klk_qr_verifications/${docId}`);
+  }
+}
+
+export async function clearAllKlkQrVerificationsInFirestore(): Promise<void> {
+  try {
+    const snap = await getDocs(collection(db, 'klk_qr_verifications'));
+    await Promise.all(snap.docs.map((d) => deleteDoc(d.ref)));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, 'klk_qr_verifications');
+  }
 }

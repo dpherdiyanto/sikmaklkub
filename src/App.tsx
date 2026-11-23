@@ -24,7 +24,11 @@ import {
   clearDocDeletedInMeta,
   sanitizeDocId,
   touchUserLastLoginInFirestore,
-  clearAllKlkSubmissionsInFirestore
+  clearAllKlkSubmissionsInFirestore,
+  syncKlkQrConfigToFirestore,
+  saveStudentQrVerificationToFirestore,
+  deleteStudentQrVerificationInFirestore,
+  clearAllKlkQrVerificationsInFirestore
 } from './utils/firestoreSync';
 import {
   ActiveTab,
@@ -40,10 +44,13 @@ import {
   AdminStaff,
   PLPStaff,
   PembimbingLapanganStaff,
+  QrSosialisasiKLK,
+  VerifiedStudentRecord,
   isMahasiswaRole,
   normalizeMahasiswaRole,
   Pengumuman
 } from './types/sikma';
+import { INITIAL_QR_LIST } from './components/KlkQrSosialisasi';
 import {
   INITIAL_DOSEN,
   CURRENT_STUDENT,
@@ -458,6 +465,44 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     return filterSherina(INITIAL_USER_ACCOUNTS);
   });
 
+  const [qrSosialisasiList, setQrSosialisasiList] = useState<QrSosialisasiKLK[]>(() => {
+    try {
+      const saved = localStorage.getItem('sikma_klk_qr_list');
+      return saved ? JSON.parse(saved) : INITIAL_QR_LIST;
+    } catch {
+      return INITIAL_QR_LIST;
+    }
+  });
+
+  const [unblockedNims, setUnblockedNims] = useState<string[]>(() => {
+    try {
+      const resetFlag = localStorage.getItem('sikma_klk_verify_lock_clean_v1');
+      if (!resetFlag) {
+        localStorage.removeItem('sikma_klk_unblocked_nims');
+        localStorage.removeItem('sikma_klk_verified_students');
+        localStorage.setItem('sikma_klk_verify_lock_clean_v1', 'true');
+        return [];
+      }
+      const saved = localStorage.getItem('sikma_klk_unblocked_nims');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [verifiedStudents, setVerifiedStudents] = useState<VerifiedStudentRecord[]>(() => {
+    try {
+      const resetFlag = localStorage.getItem('sikma_klk_verify_lock_clean_v1');
+      if (!resetFlag) {
+        return [];
+      }
+      const saved = localStorage.getItem('sikma_klk_verified_students');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   // Save changes to localStorage
   useEffect(() => {
     localStorage.setItem('sikma_dosen_data', JSON.stringify(dosenList));
@@ -563,11 +608,52 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
           if (items.length === 0) return;
           applyFromRemote(() => setPengumumanList(items));
         },
-        onRemoteReady: (colName) => {
+        onKlkQrConfigUpdate: (cfg) => {
+          if (cfg.qrList) {
+            setQrSosialisasiList(cfg.qrList);
+            try {
+              localStorage.setItem('sikma_klk_qr_list', JSON.stringify(cfg.qrList));
+            } catch {}
+          }
+          if (cfg.unblockedNims) {
+            setUnblockedNims(cfg.unblockedNims);
+            try {
+              localStorage.setItem('sikma_klk_unblocked_nims', JSON.stringify(cfg.unblockedNims));
+            } catch {}
+          }
+        },
+        onKlkQrVerificationsUpdate: (items) => {
+          const adminViewer = isBootstrappedAdminEmail(firebaseUser.email, firebaseUser.emailVerified) || currentRole === 'super_admin' || currentRole === 'admin';
+          if (adminViewer) {
+            setVerifiedStudents(items);
+            try {
+              localStorage.setItem('sikma_klk_verified_students', JSON.stringify(items));
+            } catch {}
+          } else {
+            const mapByNim = new Map<string, VerifiedStudentRecord>();
+            items.forEach((it) => mapByNim.set(it.nim.replace(/\D/g, ''), it));
+            const next = Array.from(mapByNim.values());
+            setVerifiedStudents(next);
+            try {
+              localStorage.setItem('sikma_klk_verified_students', JSON.stringify(next));
+            } catch {}
+          }
+        },
+        onRemoteReady: (colName, count) => {
           if (colName === 'klk_submissions') {
             setKlkRemoteReadyVersion((v) => v + 1);
           } else if (colName === 'users') {
             setUsersRemoteReadyVersion((v) => v + 1);
+          } else if (
+            colName === 'system_configs_klk_qr' &&
+            count === 0 &&
+            (isBootstrappedAdminEmail(firebaseUser.email, firebaseUser.emailVerified) ||
+              currentRole === 'super_admin' ||
+              currentRole === 'admin')
+          ) {
+            void syncKlkQrConfigToFirestore(qrSosialisasiList, unblockedNims, firebaseUser).catch((err) =>
+              console.warn('Seed KLK QR config warning:', err)
+            );
           }
         }
       }
@@ -1557,6 +1643,8 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     allowKlkDeletesRef.current = false;
     klkRemoteApplyRef.current = false;
     setKlkList([]);
+    setUnblockedNims([]);
+    setVerifiedStudents([]);
     try {
       localStorage.setItem('sikma_klk_data', JSON.stringify([]));
       localStorage.removeItem('sikma_klk_verified_students');
@@ -1572,10 +1660,70 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     syncAllModules(dosenList, mahasiswaList, adminList, plpList, []);
     if (isAuthReady && firebaseUser && isAdminUser) {
       try {
-        await clearAllKlkSubmissionsInFirestore(firebaseUser, remoteMetaRef.current);
+        await Promise.all([
+          clearAllKlkSubmissionsInFirestore(firebaseUser, remoteMetaRef.current),
+          syncKlkQrConfigToFirestore(qrSosialisasiList, [], firebaseUser),
+          clearAllKlkQrVerificationsInFirestore()
+        ]);
       } catch (err) {
         console.error('Reset all KLK Firestore error:', err);
       }
+    }
+  };
+
+  const handleSaveQrList = (newList: QrSosialisasiKLK[]) => {
+    setQrSosialisasiList(newList);
+    try {
+      localStorage.setItem('sikma_klk_qr_list', JSON.stringify(newList));
+    } catch {}
+    if (isAuthReady && firebaseUser && isAdminUser) {
+      void syncKlkQrConfigToFirestore(newList, unblockedNims, firebaseUser).catch((err) =>
+        console.error('Sync QR list error:', err)
+      );
+    }
+  };
+
+  const handleSaveUnblockedNims = (newNims: string[]) => {
+    setUnblockedNims(newNims);
+    try {
+      localStorage.setItem('sikma_klk_unblocked_nims', JSON.stringify(newNims));
+    } catch {}
+    if (isAuthReady && firebaseUser && isAdminUser) {
+      void syncKlkQrConfigToFirestore(qrSosialisasiList, newNims, firebaseUser).catch((err) =>
+        console.error('Sync unblocked NIMs error:', err)
+      );
+    }
+  };
+
+  const handleVerifyStudentQr = (record: VerifiedStudentRecord) => {
+    const cleanNim = record.nim.replace(/\D/g, '');
+    setVerifiedStudents((prev) => {
+      const next = [record, ...prev.filter((v) => v.nim.replace(/\D/g, '') !== cleanNim)];
+      try {
+        localStorage.setItem('sikma_klk_verified_students', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    if (isAuthReady && firebaseUser) {
+      void saveStudentQrVerificationToFirestore(record, firebaseUser).catch((err) =>
+        console.error('Save student QR verification error:', err)
+      );
+    }
+  };
+
+  const handleRemoveStudentQrVerification = (nim: string) => {
+    const cleanNim = nim.replace(/\D/g, '');
+    setVerifiedStudents((prev) => {
+      const next = prev.filter((v) => v.nim.replace(/\D/g, '') !== cleanNim);
+      try {
+        localStorage.setItem('sikma_klk_verified_students', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    if (isAuthReady && firebaseUser && isAdminUser) {
+      void deleteStudentQrVerificationInFirestore(cleanNim).catch((err) =>
+        console.error('Delete student QR verification error:', err)
+      );
     }
   };
 
@@ -2279,6 +2427,13 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
               onUpdateKLK={handleUpdateKLK}
               onResetAllKLK={handleResetAllKLK}
               onDeleteKLK={handleDeleteKLK}
+              qrSosialisasiListProp={qrSosialisasiList}
+              onSaveQrListProp={handleSaveQrList}
+              unblockedNimsProp={unblockedNims}
+              onSaveUnblockedNimsProp={handleSaveUnblockedNims}
+              verifiedStudentsProp={verifiedStudents}
+              onVerifyStudentQrProp={handleVerifyStudentQr}
+              onRemoveStudentVerificationProp={handleRemoveStudentQrVerification}
             />
           )}
 

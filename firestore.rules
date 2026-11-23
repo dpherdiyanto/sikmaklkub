@@ -273,6 +273,19 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidQrVerification(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'nim', 'nama', 'kodeQr', 'waktuVerifikasi', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerUid', 'nim', 'nama', 'kodeQr', 'waktuVerifikasi', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && isValidId(data.ownerUid)
+        && data.nim is string && data.nim.size() >= 1 && data.nim.size() <= 60
+        && data.nama is string && data.nama.size() >= 1 && data.nama.size() <= 200
+        && data.kodeQr is string && data.kodeQr.size() >= 1 && data.kodeQr.size() <= 120
+        && data.waktuVerifikasi is int
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // --- Collection Rules ---
 
     // 0. Health Connection Check Document (read-only single doc ping)
@@ -672,6 +685,33 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['isConfigDoc', 'items', 'payload', 'updatedAt']);
       allow delete: if isAdmin() && isValidId(configId);
+    }
+
+    // 14. KLK QR Socialization Attendance Verifications
+    match /klk_qr_verifications/{verificationId} {
+      allow get: if isVerified() && isValidId(verificationId) && (existing().ownerUid == request.auth.uid || isAdmin());
+      allow list: if isVerified() && (existing().ownerUid == request.auth.uid || isAdmin());
+      allow create: if isVerified()
+        && isValidId(verificationId)
+        && isValidQrVerification(incoming())
+        && (isAdmin() || incoming().ownerUid == request.auth.uid)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(verificationId)
+        && isValidQrVerification(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            existing().ownerUid == request.auth.uid
+            && incoming().ownerUid == existing().ownerUid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['nim', 'nama', 'kodeQr', 'waktuVerifikasi', 'updatedAt'])
+          )
+        );
+      allow delete: if isAdmin() && isValidId(verificationId);
     }
   }
 }

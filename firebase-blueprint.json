@@ -218,6 +218,22 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "ownerUid", "isConfigDoc", "updatedAt"]
+    },
+    "KlkQrVerification": {
+      "title": "KlkQrVerification",
+      "description": "KLK socialization QR attendance verification record per student.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "nim": { "type": "string", "maxLength": 60 },
+        "nama": { "type": "string", "maxLength": 200 },
+        "kodeQr": { "type": "string", "maxLength": 120 },
+        "waktuVerifikasi": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "nim", "nama", "kodeQr", "waktuVerifikasi", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -240,6 +256,10 @@
     "/klk_submissions/{klkId}": {
       "schema": { "$ref": "#/entities/KlkSubmission" },
       "description": "KLK student submissions, verification, logbooks, attendance, and grades."
+    },
+    "/klk_qr_verifications/{verificationId}": {
+      "schema": { "$ref": "#/entities/KlkQrVerification" },
+      "description": "Student QR socialization attendance verification records."
     },
     "/logbooks/{logbookId}": {
       "schema": { "$ref": "#/entities/LabLogbook" },
@@ -271,7 +291,7 @@
     },
     "/system_configs/{configId}": {
       "schema": { "$ref": "#/entities/SystemConfigDoc" },
-      "description": "Department configuration documents (semesters, ruangan, instansi, jajaran, arsip, rbac, lab)."
+      "description": "Department configuration documents (semesters, ruangan, instansi, jajaran, arsip, rbac, lab, klk_qr_config)."
     }
   }
 }

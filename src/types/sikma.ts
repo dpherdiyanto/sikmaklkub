@@ -1099,3 +1099,24 @@ export interface DataIndukMahasiswaS2 {
   dosenPembimbing1: string;
   dosenPembimbing2: string;
 }
+
+export interface QrSosialisasiKLK {
+  id: string;
+  kode: string;
+  judul: string;
+  waktuDibuat: number;
+  durasiJam: number;
+  durasiMenit?: number;
+  waktuKadaluarsa: number;
+  dibuatOleh: string;
+  keterangan?: string;
+  status: 'Aktif' | 'Kadaluarsa' | 'Nonaktif';
+}
+
+export interface VerifiedStudentRecord {
+  nim: string;
+  nama: string;
+  kodeQr: string;
+  waktuVerifikasi: number;
+}
+

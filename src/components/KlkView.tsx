@@ -3234,6 +3234,13 @@ interface KlkViewProps {
   onUpdateKLK?: (updatedKlk: PengajuanKLK) => void;
   onResetAllKLK?: () => Promise<void> | void;
   onDeleteKLK?: (id: string) => void;
+  qrSosialisasiListProp?: QrSosialisasiKLK[];
+  onSaveQrListProp?: (newList: QrSosialisasiKLK[]) => void;
+  unblockedNimsProp?: string[];
+  onSaveUnblockedNimsProp?: (newNims: string[]) => void;
+  verifiedStudentsProp?: VerifiedStudentRecord[];
+  onVerifyStudentQrProp?: (record: VerifiedStudentRecord) => void;
+  onRemoveStudentVerificationProp?: (nim: string) => void;
 }
 
 export const KlkView: React.FC<KlkViewProps> = ({
@@ -3256,7 +3263,14 @@ export const KlkView: React.FC<KlkViewProps> = ({
   onSimpanNilai,
   onUpdateKLK,
   onResetAllKLK,
-  onDeleteKLK
+  onDeleteKLK,
+  qrSosialisasiListProp,
+  onSaveQrListProp,
+  unblockedNimsProp,
+  onSaveUnblockedNimsProp,
+  verifiedStudentsProp,
+  onVerifyStudentQrProp,
+  onRemoveStudentVerificationProp
 }) => {
   // Ambil data user aktif (dari prop currentUser atau fallback localStorage)
   const effectiveUser = useMemo(() => {
@@ -3342,8 +3356,8 @@ export const KlkView: React.FC<KlkViewProps> = ({
     return mahasiswaList[0] || student;
   }, [isMahasiswa, effectiveUser, student, mahasiswaList, formSelectedMhsId]);
 
-  // State QR Sosialisasi & Otorisasi Buka Blokir
-  const [qrSosialisasiList, setQrSosialisasiList] = useState<QrSosialisasiKLK[]>(() => {
+  // State QR Sosialisasi & Otorisasi Buka Blokir (fallback lokal + sinkronisasi prop Firestore)
+  const [qrSosialisasiState, setQrSosialisasiState] = useState<QrSosialisasiKLK[]>(() => {
     try {
       const saved = localStorage.getItem('sikma_klk_qr_list');
       return saved ? JSON.parse(saved) : INITIAL_QR_LIST;
@@ -3352,7 +3366,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
     }
   });
 
-  const [unblockedNims, setUnblockedNims] = useState<string[]>(() => {
+  const [unblockedNimsState, setUnblockedNimsState] = useState<string[]>(() => {
     try {
       const resetFlag = localStorage.getItem('sikma_klk_verify_lock_clean_v1');
       if (!resetFlag) {
@@ -3368,7 +3382,7 @@ export const KlkView: React.FC<KlkViewProps> = ({
     }
   });
 
-  const [verifiedStudents, setVerifiedStudents] = useState<VerifiedStudentRecord[]>(() => {
+  const [verifiedStudentsState, setVerifiedStudentsState] = useState<VerifiedStudentRecord[]>(() => {
     try {
       const resetFlag = localStorage.getItem('sikma_klk_verify_lock_clean_v1');
       if (!resetFlag) {
@@ -3381,21 +3395,27 @@ export const KlkView: React.FC<KlkViewProps> = ({
     }
   });
 
+  const qrSosialisasiList = qrSosialisasiListProp ?? qrSosialisasiState;
+  const unblockedNims = unblockedNimsProp ?? unblockedNimsState;
+  const verifiedStudents = verifiedStudentsProp ?? verifiedStudentsState;
+
   const [isQrManagerModalOpen, setIsQrManagerModalOpen] = useState(false);
   const [projectorQrItem, setProjectorQrItem] = useState<QrSosialisasiKLK | null>(null);
 
   const handleSaveQrList = (newList: QrSosialisasiKLK[]) => {
-    setQrSosialisasiList(newList);
+    setQrSosialisasiState(newList);
     try {
       localStorage.setItem('sikma_klk_qr_list', JSON.stringify(newList));
     } catch {}
+    onSaveQrListProp?.(newList);
   };
 
   const handleSaveUnblockedNims = (newNims: string[]) => {
-    setUnblockedNims(newNims);
+    setUnblockedNimsState(newNims);
     try {
       localStorage.setItem('sikma_klk_unblocked_nims', JSON.stringify(newNims));
     } catch {}
+    onSaveUnblockedNimsProp?.(newNims);
   };
 
   const handleVerifyStudentSuccess = (kode: string) => {
@@ -3408,10 +3428,21 @@ export const KlkView: React.FC<KlkViewProps> = ({
       waktuVerifikasi: Date.now()
     };
     const updated = [newRecord, ...verifiedStudents.filter((v) => v.nim.replace(/\D/g, '') !== studentNim)];
-    setVerifiedStudents(updated);
+    setVerifiedStudentsState(updated);
     try {
       localStorage.setItem('sikma_klk_verified_students', JSON.stringify(updated));
     } catch {}
+    onVerifyStudentQrProp?.(newRecord);
+  };
+
+  const handleRemoveStudentVerification = (nim: string) => {
+    const cleanNim = nim.replace(/\D/g, '');
+    const updated = verifiedStudents.filter((v) => v.nim.replace(/\D/g, '') !== cleanNim);
+    setVerifiedStudentsState(updated);
+    try {
+      localStorage.setItem('sikma_klk_verified_students', JSON.stringify(updated));
+    } catch {}
+    onRemoveStudentVerificationProp?.(cleanNim);
   };
 
   const activeStudentNimClean = (effectiveUser?.identifier || student.nim).replace(/\D/g, '');
@@ -28807,6 +28838,8 @@ ${instansiMitra}
         onSaveQrList={handleSaveQrList}
         unblockedNims={unblockedNims}
         onSaveUnblockedNims={handleSaveUnblockedNims}
+        verifiedStudents={verifiedStudents}
+        onRemoveStudentVerification={handleRemoveStudentVerification}
         adminName={effectiveUser?.nama || 'Administrator Kimia UB'}
         onOpenProjector={(qr) => setProjectorQrItem(qr)}
         mahasiswaList={mahasiswaList}
