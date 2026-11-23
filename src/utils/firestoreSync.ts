@@ -1295,6 +1295,55 @@ export async function syncKlkListToFirestore(
   }
 }
 
+/**
+ * Mengosongkan seluruh dokumen pada koleksi `klk_submissions` di Firestore
+ * secara langsung (menghindari race condition onSnapshot saat penghapusan batch).
+ */
+export async function clearAllKlkSubmissionsInFirestore(
+  firebaseUser: FirebaseUser,
+  meta: RemoteSyncMeta
+): Promise<number> {
+  const colName = 'klk_submissions';
+  // Batalkan loop sinkronisasi KLK yang mungkin sedang berjalan
+  meta.syncVersions[colName] = (meta.syncVersions[colName] || 0) + 1;
+
+  try {
+    const snap = await getDocs(collection(db, colName));
+    const docRefs = snap.docs.map((d) => d.ref);
+    await Promise.all(
+      docRefs.map(async (ref) => {
+        try {
+          await deleteDoc(ref);
+        } catch (err) {
+          handleFirestoreError(err, OperationType.DELETE, `${colName}/${ref.id}`);
+        }
+      })
+    );
+
+    // Pastikan ID yang masih tercatat di meta lokal juga ikut terhapus bila ada
+    const known = meta.knownIds[colName] || new Set<string>();
+    const snapIds = new Set(snap.docs.map((d) => d.id));
+    const extraIds = Array.from(known).filter((id) => !snapIds.has(id));
+    await Promise.all(
+      extraIds.map(async (id) => {
+        try {
+          await deleteDoc(doc(db, colName, id));
+        } catch {
+          // Abaikan jika sudah terhapus
+        }
+      })
+    );
+
+    meta.knownIds[colName] = new Set<string>();
+    meta.ownerMap[colName] = {};
+    meta.hashes[colName] = {};
+    void firebaseUser;
+    return docRefs.length;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, colName);
+  }
+}
+
 export async function syncUsersListToFirestore(
   items: UserAccountItem[],
   firebaseUser: FirebaseUser,

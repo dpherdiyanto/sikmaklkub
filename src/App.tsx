@@ -23,7 +23,8 @@ import {
   markDocDeletedInMeta,
   clearDocDeletedInMeta,
   sanitizeDocId,
-  touchUserLastLoginInFirestore
+  touchUserLastLoginInFirestore,
+  clearAllKlkSubmissionsInFirestore
 } from './utils/firestoreSync';
 import {
   ActiveTab,
@@ -1551,9 +1552,10 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     );
   };
 
-  const handleResetAllKLK = () => {
-    pendingLocalKlkSyncRef.current = true;
-    allowKlkDeletesRef.current = true;
+  const handleResetAllKLK = async () => {
+    pendingLocalKlkSyncRef.current = false;
+    allowKlkDeletesRef.current = false;
+    klkRemoteApplyRef.current = false;
     setKlkList([]);
     try {
       localStorage.setItem('sikma_klk_data', JSON.stringify([]));
@@ -1563,9 +1565,18 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
       localStorage.removeItem('sikma_klk_form_submitted_id');
       localStorage.removeItem('sikma_klk_berkas_checklist_v1');
       localStorage.removeItem('sikma_klk_dosen_akademik_check_v1');
+      localStorage.removeItem('sikma_klk_verifikasi_form_notes_v1');
+      localStorage.removeItem('sikma_klk_bimbingan_sesi');
       sessionStorage.removeItem('sikma_klk_form_submitted_id');
     } catch {}
     syncAllModules(dosenList, mahasiswaList, adminList, plpList, []);
+    if (isAuthReady && firebaseUser && isAdminUser) {
+      try {
+        await clearAllKlkSubmissionsInFirestore(firebaseUser, remoteMetaRef.current);
+      } catch (err) {
+        console.error('Reset all KLK Firestore error:', err);
+      }
+    }
   };
 
   const handleDeleteKLK = (id: string) => {
