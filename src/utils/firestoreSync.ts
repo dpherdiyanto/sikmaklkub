@@ -14,7 +14,7 @@ import {
   where,
   Unsubscribe
 } from 'firebase/firestore';
-import { db, FirebaseUser, handleFirestoreError, OperationType } from '../firebase';
+import { db, ensureUserAuthLinked, FirebaseUser, handleFirestoreError, isRealFirebaseUid, OperationType } from '../firebase';
 import {
   AdminStaff,
   AuthUser,
@@ -34,6 +34,7 @@ import {
 } from '../types/sikma';
 import { UserAccountItem } from '../data/userList';
 import { createLastLoginTimestamp, parseLastLoginIso } from './lastLoginFormat';
+import { getCandidateDefaultPasswords } from './syncUserAndSdm';
 
 export const BOOTSTRAPPED_ADMIN_EMAIL = 'dp.herdiyanto@gmail.com';
 export const ZUPER_ADMIN_EMAIL = 'zuperadmin@ub.ac.id';
@@ -191,25 +192,45 @@ export async function resolveOrCreateAuthUserFromGoogle(
     await ensureAdminRecordIfBootstrapped(firebaseUser);
   }
 
-  // 1. Check user doc keyed by uid
+  // 1. Check user doc keyed by uid or owned by uid (prevents duplicate doc if user doc has usr-* ID)
   const userDocRef = doc(db, 'users', uid);
   try {
-    const snap = await getDoc(userDocRef);
-    if (snap.exists()) {
-      const data = snap.data();
+    let existingSnap = await getDoc(userDocRef);
+    if (!existingSnap.exists()) {
+      try {
+        const ownedSnap = await getDocs(query(collection(db, 'users'), where('ownerUid', '==', uid), limit(5)));
+        if (!ownedSnap.empty) {
+          existingSnap = ownedSnap.docs[0];
+        }
+      } catch {
+        // ignore query error
+      }
+    }
+    if (!existingSnap.exists() && isRootAdmin && email) {
+      try {
+        const emailSnap = await getDocs(query(collection(db, 'users'), where('email', '==', email), limit(5)));
+        const adminDoc = emailSnap.docs.find((d) => d.data()?.role === 'super_admin') || emailSnap.docs[0];
+        if (adminDoc) existingSnap = adminDoc;
+      } catch {
+        // ignore query error
+      }
+    }
+    if (existingSnap.exists()) {
+      const data = existingSnap.data();
       const resolvedRole: UserRole = isRootAdmin
         ? 'super_admin'
         : normalizeMahasiswaRole(data.role as string, data.unit as string);
       const nowIso = createLastLoginTimestamp();
 
-      await updateDoc(userDocRef, {
+      await updateDoc(existingSnap.ref, {
+        ...(isRootAdmin && data.ownerUid !== uid ? { ownerUid: uid } : {}),
         terakhirLogin: clampStr(nowIso, 120),
         updatedAt: serverTimestamp()
       });
 
       return {
-        id: clampStr(data.id || uid, 128),
-        ownerUid: clampStr(data.ownerUid || uid, 128),
+        id: clampStr(data.id || existingSnap.id || uid, 128),
+        ownerUid: clampStr(isRootAdmin ? uid : (data.ownerUid || uid), 128),
         username: clampStr(data.username || email, 100),
         nama: clampStr(data.nama || firebaseUser.displayName || 'Pengguna SIKMA', 200),
         role: resolvedRole,
@@ -1431,7 +1452,9 @@ export async function syncUsersListToFirestore(
     }
     currentIds.add(docId);
     const cleanPayload = buildUserDocPayload(item, docId);
-    const nextHash = stableHash(cleanPayload);
+    const explicitRealUid = isRealFirebaseUid(item.ownerUid) ? sanitizeDocId(item.ownerUid!, 'usr') : '';
+    const ownerUidForWrite = explicitRealUid || (item.ownerUid === 'unlinked-pending' ? 'unlinked-pending' : '');
+    const nextHash = stableHash({ ...cleanPayload, ownerUid: ownerUidForWrite });
     if (known.has(docId) && prevHashes[docId] === nextHash) {
       continue;
     }
@@ -1441,6 +1464,7 @@ export async function syncUsersListToFirestore(
       if (known.has(docId)) {
         await updateDoc(docRef, {
           ...cleanPayload,
+          ...(ownerUidForWrite ? { ownerUid: ownerUidForWrite } : {}),
           updatedAt: serverTimestamp()
         });
       } else {
@@ -1449,6 +1473,7 @@ export async function syncUsersListToFirestore(
         if (snap.exists()) {
           await updateDoc(docRef, {
             ...cleanPayload,
+            ...(ownerUidForWrite ? { ownerUid: ownerUidForWrite } : {}),
             updatedAt: serverTimestamp()
           });
         } else {
@@ -1457,7 +1482,7 @@ export async function syncUsersListToFirestore(
             cleanPayload.email.toLowerCase() === (firebaseUser.email || '').trim().toLowerCase() ||
             docId === uid;
           const resolvedOwnerUid =
-            (item.ownerUid ? sanitizeDocId(item.ownerUid, 'usr') : '') ||
+            explicitRealUid ||
             (ownerMap[docId] && ownerMap[docId] !== uid ? ownerMap[docId] : '') ||
             (isSelfRootUser ? uid : docId);
           await setDoc(docRef, {
@@ -2084,13 +2109,26 @@ export async function resolveAuthenticatedUserProfile(
     // 1b. Non-bootstrapped users: safe query by ownerUid == firebaseUser.uid (works for ALL roles under firestore.rules)
     try {
       const ownedSnap = await getDocs(
-        query(collection(db, 'users'), where('ownerUid', '==', fbUid), limit(1))
+        query(collection(db, 'users'), where('ownerUid', '==', fbUid), limit(10))
       );
       if (!ownedSnap.empty) {
-        foundDocSnap = ownedSnap.docs[0];
+        foundDocSnap =
+          ownedSnap.docs.find((d) => String(d.data()?.status || 'Aktif') === 'Aktif') ||
+          ownedSnap.docs[0];
       }
     } catch (err) {
       console.warn('Query users by ownerUid warning:', err);
+    }
+
+    if (!foundDocSnap) {
+      try {
+        const selfDoc = await getDoc(doc(db, 'users', fbUid));
+        if (selfDoc.exists()) {
+          foundDocSnap = selfDoc;
+        }
+      } catch {
+        // ignore if doc id != fbUid or permission restricted
+      }
     }
   }
 
@@ -2349,4 +2387,189 @@ export async function clearAllKlkQrVerificationsInFirestore(): Promise<void> {
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, 'klk_qr_verifications');
   }
+}
+
+export interface BatchAuthProvisionSummary {
+  updatedUsers: UserAccountItem[];
+  linkedCount: number;
+  createdCount: number;
+  conflictUsernames: string[];
+  rateLimitedUsernames: string[];
+  errorCount: number;
+}
+
+export interface BatchAuthProvisionProgress {
+  processed: number;
+  total: number;
+  linkedCount: number;
+  createdCount: number;
+  conflictCount: number;
+  rateLimitedCount: number;
+  errorCount: number;
+  currentUsername?: string;
+  waitingCooldown?: boolean;
+}
+
+const sleepMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Memastikan setiap akun aktif pada daftar `users` sudah memiliki akun login Firebase Auth
+ * (`<username>@sikma.ub.ac.id`) dan dokumen Firestore `users/{docId}` menautkan `ownerUid` asli.
+ * Bersifat non-destruktif: tidak menimpa kata sandi kustom milik pengguna yang sudah ada,
+ * serta dilengkapi jeda permintaan dan coba ulang otomatis saat terkena rate-limit Auth.
+ */
+export async function provisionAndLinkUsersBatch(
+  users: UserAccountItem[],
+  firebaseUser: FirebaseUser | null,
+  options?: {
+    onlyUnlinked?: boolean;
+    includeSuperAdmin?: boolean;
+    onProgress?: (progress: BatchAuthProvisionProgress) => void;
+  }
+): Promise<BatchAuthProvisionSummary> {
+  const onlyUnlinked = options?.onlyUnlinked ?? true;
+  const includeSuperAdmin = options?.includeSuperAdmin ?? false;
+  const onProgress = options?.onProgress;
+  let linkedCount = 0;
+  let createdCount = 0;
+  let errorCount = 0;
+  const conflictUsernames: string[] = [];
+  const rateLimitedUsernames: string[] = [];
+
+  if (!firebaseUser || !Array.isArray(users) || users.length === 0) {
+    return { updatedUsers: users, linkedCount, createdCount, conflictUsernames, rateLimitedUsernames, errorCount };
+  }
+
+  const nextUsers = [...users];
+  const targetIndices: number[] = [];
+  const seenBatchUsernames = new Set<string>();
+
+  for (let i = 0; i < nextUsers.length; i++) {
+    const u = nextUsers[i];
+    if (!u || typeof u !== 'object') continue;
+    if (u.status !== 'Aktif') continue;
+    if (!includeSuperAdmin && u.role === 'super_admin' && (u.username || '').toLowerCase() === 'superadmin') {
+      continue;
+    }
+    if (onlyUnlinked && isRealFirebaseUid(u.ownerUid)) {
+      continue;
+    }
+    const uname = (u.username || '').trim();
+    if (!uname) continue;
+    const unameLower = uname.toLowerCase();
+    if (seenBatchUsernames.has(unameLower)) continue;
+    seenBatchUsernames.add(unameLower);
+    targetIndices.push(i);
+  }
+
+  const total = targetIndices.length;
+  const paceDelayMs = total > 20 ? 180 : total > 5 ? 110 : 0;
+
+  onProgress?.({
+    processed: 0,
+    total,
+    linkedCount,
+    createdCount,
+    conflictCount: 0,
+    rateLimitedCount: 0,
+    errorCount
+  });
+
+  for (let idxPos = 0; idxPos < targetIndices.length; idxPos++) {
+    const i = targetIndices[idxPos];
+    const u = nextUsers[i];
+    const uname = (u.username || '').trim();
+
+    if (idxPos > 0 && paceDelayMs > 0) {
+      await sleepMs(paceDelayMs);
+    }
+
+    const authEmail =
+      u.role === 'super_admin' && uname.toLowerCase() === 'superadmin'
+        ? ZUPER_ADMIN_EMAIL
+        : usernameToAuthEmail(uname);
+
+    const candidatePasswords = getCandidateDefaultPasswords(u.role, u.jabatan, u.password);
+    let provRes = await ensureUserAuthLinked(authEmail, candidatePasswords);
+
+    // Retry with progressive cooldown if Firebase Auth throttles requests
+    for (let retry = 0; retry < 2 && provRes.status === 'rate_limited'; retry++) {
+      onProgress?.({
+        processed: idxPos,
+        total,
+        linkedCount,
+        createdCount,
+        conflictCount: conflictUsernames.length,
+        rateLimitedCount: rateLimitedUsernames.length,
+        errorCount,
+        currentUsername: uname,
+        waitingCooldown: true
+      });
+      await sleepMs((retry + 1) * 3000);
+      provRes = await ensureUserAuthLinked(authEmail, candidatePasswords);
+    }
+
+    if (provRes.status === 'created' || provRes.status === 'matched' || provRes.status === 'updated') {
+      const realUid = sanitizeDocId(provRes.uid, 'user');
+      const docId = sanitizeDocId(u.id, 'user');
+
+      nextUsers[i] = {
+        ...u,
+        ownerUid: realUid
+      };
+
+      if (provRes.status === 'created') createdCount++;
+      linkedCount++;
+
+      try {
+        const userRef = doc(db, 'users', docId);
+        const snap = await getDoc(userRef);
+        const payload = buildUserDocPayload({ ...u, id: docId }, docId);
+        if (snap.exists()) {
+          await updateDoc(userRef, {
+            ...payload,
+            ownerUid: realUid,
+            updatedAt: serverTimestamp()
+          });
+        } else {
+          await setDoc(userRef, {
+            ...payload,
+            ownerUid: realUid,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp()
+          });
+        }
+      } catch (err) {
+        console.warn(`Link ownerUid warning for ${docId}:`, err);
+      }
+    } else if (provRes.status === 'exists_different_password') {
+      conflictUsernames.push(uname);
+    } else if (provRes.status === 'rate_limited') {
+      rateLimitedUsernames.push(uname);
+      errorCount++;
+    } else {
+      errorCount++;
+    }
+
+    onProgress?.({
+      processed: idxPos + 1,
+      total,
+      linkedCount,
+      createdCount,
+      conflictCount: conflictUsernames.length,
+      rateLimitedCount: rateLimitedUsernames.length,
+      errorCount,
+      currentUsername: uname,
+      waitingCooldown: false
+    });
+  }
+
+  return {
+    updatedUsers: nextUsers,
+    linkedCount,
+    createdCount,
+    conflictUsernames,
+    rateLimitedUsernames,
+    errorCount
+  };
 }

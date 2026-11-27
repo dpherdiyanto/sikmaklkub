@@ -1,5 +1,53 @@
 import { UserAccountItem } from '../data/userList';
-import { Dosen, Mahasiswa, AdminStaff, PLPStaff, PembimbingLapanganStaff, UserRole, PengajuanKLK, LogbookLabItem, JadwalSeminar, SuratPengajuan, LabRiset, isMahasiswaRole, getMahasiswaJenjang, inferMahasiswaRoleFromText, normalizeMahasiswaRole } from '../types/sikma';
+import { Dosen, Mahasiswa, AdminStaff, PLPStaff, PembimbingLapanganStaff, UserRole, PengajuanKLK, LogbookLabItem, JadwalSeminar, SuratPengajuan, LabRiset, isMahasiswaRole, getMahasiswaJenjang, inferMahasiswaRoleFromText, normalizeMahasiswaRole, getUserRoleLabel } from '../types/sikma';
+
+export const getDefaultPasswordForRole = (role?: string, jabatan?: string): string => {
+  const r = String(role || '').toLowerCase();
+  const jab = String(jabatan || '').toLowerCase();
+  if (r === 'super_admin') return 'Super@123';
+  if (r === 'dosen') return 'Dosen@123';
+  if (
+    r === 'eksternal' ||
+    jab.includes('pembimbing lapangan') ||
+    jab.includes('pembimbing lapang') ||
+    jab.includes('mentor')
+  ) {
+    return 'Pembimbing@123';
+  }
+  if (r === 'admin' && (jab.includes('plp') || jab.includes('laboran') || jab.includes('pranata laboratorium'))) {
+    return 'Labor@123';
+  }
+  if (r === 'admin') return 'Admin@123';
+  return 'Mhs#2024';
+};
+
+export const getCandidateDefaultPasswords = (
+  role?: string,
+  jabatan?: string,
+  currentStoredPassword?: string
+): string[] => {
+  const candidates: string[] = [];
+  const rawStored = (currentStoredPassword || '').trim();
+  if (rawStored && !/^\$?sha256\$/i.test(rawStored)) {
+    candidates.push(rawStored);
+  }
+  candidates.push(getDefaultPasswordForRole(role, jabatan));
+
+  const r = String(role || '').toLowerCase();
+  const jab = String(jabatan || '').toLowerCase();
+  if (r === 'super_admin') {
+    candidates.push('Super@123');
+  } else if (r === 'eksternal' || jab.includes('pembimbing lapangan') || jab.includes('pembimbing lapang') || jab.includes('mentor')) {
+    candidates.push('Pembimbing@123');
+  } else if (r === 'dosen') {
+    candidates.push('Dosen@123', 'Admin@123');
+  } else if (r === 'admin') {
+    candidates.push('Admin@123', 'Labor@123', 'Dosen@123');
+  } else {
+    candidates.push('Mhs#2024', 'Mhs#123');
+  }
+  return Array.from(new Set(candidates.filter(Boolean)));
+};
 
 // Helper: Extract Clean Initials
 export const getInitials = (str?: string): string => {
@@ -147,6 +195,331 @@ export interface SyncResult {
   totalSynced: number;
 }
 
+const AUTH_REAL_UID_REGEX = /^[A-Za-z0-9]{20,}$/;
+
+export const isPlaceholderEmail = (email?: string): boolean => {
+  const e = String(email || '').trim().toLowerCase();
+  if (!e || !e.includes('@') || e.length < 5) return true;
+  if (e === '_@ub.ac.id' || e.startsWith('_@') || e.startsWith('-@') || e.startsWith('.@')) return true;
+  const [localPart, domainPart] = e.split('@');
+  if (!localPart || !domainPart || !domainPart.includes('.')) return true;
+  if (/^[_.-]+$/.test(localPart)) return true;
+  return false;
+};
+
+export const sanitizeUserEmail = (
+  email?: string,
+  role?: UserRole | string,
+  numericId?: string,
+  fallbackSdmEmail?: string
+): string => {
+  const raw = String(email || '').trim();
+  const cleanNum = String(numericId || '').replace(/\D/g, '');
+  const isMhs = isMahasiswaRole(role as UserRole);
+
+  const isEmailUsable = (candidate?: string): boolean => {
+    const c = String(candidate || '').trim();
+    if (isPlaceholderEmail(c)) return false;
+    if (isMhs && cleanNum.length >= 5) {
+      const lower = c.toLowerCase();
+      const studentMatch = lower.match(/^(\d+)@student\.ub\.ac\.id$/);
+      if (studentMatch && studentMatch[1] !== cleanNum) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  if (isEmailUsable(raw)) return raw;
+  if (isEmailUsable(fallbackSdmEmail)) return String(fallbackSdmEmail).trim();
+  if (isMhs && cleanNum.length >= 5) return `${cleanNum}@student.ub.ac.id`;
+  return '';
+};
+
+export const extractUserNumericIdentity = (
+  user?: Pick<UserAccountItem, 'username' | 'identifier' | 'role'> | null
+): string => {
+  if (!user) return '';
+  const roleLower = String(user.role || '').trim().toLowerCase();
+  if (roleLower === 'super_admin' || roleLower === 'eksternal') return '';
+  const uDigits = String(user.username || '').replace(/\D/g, '');
+  if (uDigits.length >= 5) return uDigits;
+  const idDigits = String(user.identifier || '').replace(/\D/g, '');
+  if (idDigits.length >= 5) return idDigits;
+  return '';
+};
+
+export const getNormalizedUserIdentityKey = (
+  user?: Pick<UserAccountItem, 'username' | 'identifier' | 'role' | 'email' | 'id'> | null
+): string => {
+  if (!user) return '';
+  const roleLower = String(user.role || '').trim().toLowerCase();
+  const uname = String(user.username || '').trim().toLowerCase();
+  const numId = extractUserNumericIdentity(user);
+
+  if (roleLower !== 'super_admin' && roleLower !== 'eksternal' && numId) {
+    return `num:${numId}`;
+  }
+  if (uname) {
+    return `u:${uname}`;
+  }
+  const cleanEmail = String(user.email || '').trim().toLowerCase();
+  if (!isPlaceholderEmail(cleanEmail)) {
+    return `e:${cleanEmail}`;
+  }
+  return `id:${String(user.id || '')}`;
+};
+
+export interface DuplicateUserConflict {
+  conflictUser: UserAccountItem;
+  reason: 'username' | 'identifier';
+  message: string;
+}
+
+export const findDuplicateUserConflict = (
+  users: UserAccountItem[],
+  candidate: {
+    username?: string;
+    identifier?: string;
+    email?: string;
+    role?: UserRole | string;
+    jabatan?: string;
+  },
+  excludeUserId?: string
+): DuplicateUserConflict | null => {
+  const candUname = String(candidate.username || '').trim().toLowerCase();
+  const candRole = String(candidate.role || '').trim().toLowerCase();
+  const candJab = String(candidate.jabatan || '').trim().toLowerCase();
+  const isCandExemptId =
+    candRole === 'super_admin' ||
+    candRole === 'eksternal' ||
+    candJab.includes('pembimbing lapangan') ||
+    candJab.includes('mentor');
+
+  const candNums = new Set<string>();
+  if (!isCandExemptId) {
+    const uDigits = String(candidate.username || '').replace(/\D/g, '');
+    const iDigits = String(candidate.identifier || '').replace(/\D/g, '');
+    if (uDigits.length >= 5) candNums.add(uDigits);
+    if (iDigits.length >= 5) candNums.add(iDigits);
+  }
+
+  for (const u of users) {
+    if (!u || (excludeUserId && u.id === excludeUserId)) continue;
+
+    const uUname = String(u.username || '').trim().toLowerCase();
+    if (candUname && uUname && uUname === candUname) {
+      return {
+        conflictUser: u,
+        reason: 'username',
+        message: `Username "${u.username}" sudah terdaftar atas nama ${u.nama} (${getUserRoleLabel(u.role)}). Gunakan akun yang sudah ada atau ubah datanya di tombol Edit.`
+      };
+    }
+
+    if (candNums.size > 0) {
+      const uRole = String(u.role || '').trim().toLowerCase();
+      const uJab = String(u.jabatan || '').trim().toLowerCase();
+      const isUExempt =
+        uRole === 'super_admin' ||
+        uRole === 'eksternal' ||
+        uJab.includes('pembimbing lapangan') ||
+        uJab.includes('mentor');
+      if (!isUExempt) {
+        const uNumU = String(u.username || '').replace(/\D/g, '');
+        const uNumI = String(u.identifier || '').replace(/\D/g, '');
+        const matchedNum =
+          (uNumU.length >= 5 && candNums.has(uNumU) ? uNumU : '') ||
+          (uNumI.length >= 5 && candNums.has(uNumI) ? uNumI : '');
+        if (matchedNum) {
+          return {
+            conflictUser: u,
+            reason: 'identifier',
+            message: `${isMahasiswaRole(candidate.role as UserRole) ? 'NIM' : 'NIP/Username'} "${matchedNum}" sudah terdaftar atas nama ${u.nama} (${getUserRoleLabel(u.role)}, @${u.username}). Sistem menolak pembuatan akun ganda.`
+          };
+        }
+      }
+    }
+  }
+
+  return null;
+};
+
+export interface DuplicateUserGroup {
+  key: string;
+  survivor: UserAccountItem;
+  duplicates: UserAccountItem[];
+  distinctRealUids: string[];
+}
+
+export interface DeduplicateUsersResult {
+  deduplicatedUsers: UserAccountItem[];
+  duplicateGroups: DuplicateUserGroup[];
+  removedUsers: UserAccountItem[];
+  removedDocIds: string[];
+}
+
+const isMeaningfulLastLogin = (val?: string): boolean => {
+  const s = String(val || '').trim();
+  return Boolean(s && s !== 'Belum pernah login' && s !== '-');
+};
+
+const scoreUserCandidateForKeep = (u: UserAccountItem): number => {
+  let score = 0;
+  if (u.status === 'Aktif') score += 2000;
+  if (typeof u.ownerUid === 'string' && AUTH_REAL_UID_REGEX.test(u.ownerUid.trim())) {
+    score += 1000;
+    // Dokumen usr-* yang baru ditautkan pada batch sync biasanya memiliki ownerUid === UID aktif <nim>@sikma.ub.ac.id
+    if (u.id.startsWith('usr-') && u.ownerUid.trim() !== u.id.trim()) {
+      score += 300;
+    }
+  }
+  const numId = extractUserNumericIdentity(u);
+  const cleanedEmail = sanitizeUserEmail(u.email, u.role, numId);
+  if (cleanedEmail && cleanedEmail === String(u.email || '').trim()) score += 150;
+  if (isMeaningfulLastLogin(u.terakhirLogin)) score += 80;
+  if (u.passwordChangedAt) score += 40;
+  if (u.noHp && u.noHp.trim()) score += 20;
+  if (u.unit && u.unit.trim() && !u.unit.toLowerCase().includes('undefined')) score += 10;
+  if (u.id.startsWith('usr-dos-') || u.id.startsWith('usr-mhs-') || u.id.startsWith('usr-adm-') || u.id.startsWith('usr-plp-')) {
+    score += 5;
+  }
+  return score;
+};
+
+export const deduplicateUserAccounts = (
+  users: UserAccountItem[],
+  sdmFallback?: {
+    dosenList?: Dosen[];
+    mahasiswaList?: Mahasiswa[];
+    adminList?: AdminStaff[];
+    plpList?: PLPStaff[];
+  }
+): DeduplicateUsersResult => {
+  if (!Array.isArray(users) || users.length === 0) {
+    return { deduplicatedUsers: [], duplicateGroups: [], removedUsers: [], removedDocIds: [] };
+  }
+
+  const keyToOrderIndex = new Map<string, number>();
+  const groups: UserAccountItem[][] = [];
+
+  users.forEach((u) => {
+    if (!u || typeof u !== 'object') return;
+    const key = getNormalizedUserIdentityKey(u) || `raw:${u.id}`;
+    const existingGroupIdx = keyToOrderIndex.get(key);
+    if (existingGroupIdx !== undefined) {
+      groups[existingGroupIdx].push(u);
+    } else {
+      keyToOrderIndex.set(key, groups.length);
+      groups.push([u]);
+    }
+  });
+
+  const deduplicatedUsers: UserAccountItem[] = [];
+  const duplicateGroups: DuplicateUserGroup[] = [];
+  const removedUsers: UserAccountItem[] = [];
+  const removedDocIds: string[] = [];
+
+  groups.forEach((members) => {
+    if (members.length === 1) {
+      deduplicatedUsers.push(members[0]);
+      return;
+    }
+
+    const sorted = [...members].sort((a, b) => scoreUserCandidateForKeep(b) - scoreUserCandidateForKeep(a));
+    const best = sorted[0];
+    const dups = sorted.slice(1);
+    const numId = extractUserNumericIdentity(best);
+
+    // Cari email fallback dari SDM jika ada
+    let sdmEmail = '';
+    let sdmPhone = '';
+    if (sdmFallback && numId) {
+      if (isMahasiswaRole(best.role)) {
+        const m = sdmFallback.mahasiswaList?.find((it) => (it.nim || '').replace(/\D/g, '') === numId);
+        sdmEmail = m?.email || '';
+        sdmPhone = m?.telepon || '';
+      } else if (best.role === 'dosen') {
+        const d = sdmFallback.dosenList?.find((it) => (it.nip || '').replace(/\D/g, '') === numId);
+        sdmEmail = d?.email || '';
+        sdmPhone = d?.telepon || '';
+      } else if (best.role === 'admin') {
+        const a = sdmFallback.adminList?.find((it) => (it.nip || '').replace(/\D/g, '') === numId);
+        const p = sdmFallback.plpList?.find((it) => (it.nip || '').replace(/\D/g, '') === numId);
+        sdmEmail = a?.email || p?.email || '';
+        sdmPhone = a?.telepon || p?.telepon || '';
+      }
+    }
+
+    const validEmailCandidate =
+      sorted
+        .map((c) => sanitizeUserEmail(c.email, c.role, numId, sdmEmail))
+        .find((e) => Boolean(e)) ||
+      sanitizeUserEmail('', best.role, numId, sdmEmail);
+
+    const bestLastLogin =
+      sorted.map((c) => c.terakhirLogin).find((t) => isMeaningfulLastLogin(t)) ||
+      best.terakhirLogin ||
+      'Belum pernah login';
+
+    const bestPhone =
+      sorted.map((c) => (c.noHp || '').trim()).find((p) => Boolean(p)) ||
+      sdmPhone ||
+      '';
+
+    const bestPasswordChangedAt = sorted.map((c) => c.passwordChangedAt).find((v) => Boolean(v));
+    const bestPassword =
+      sorted.map((c) => c.password).find((p) => Boolean(p && p.trim())) || best.password;
+
+    const realOwnerUids = Array.from(
+      new Set(
+        sorted
+          .map((c) => (typeof c.ownerUid === 'string' ? c.ownerUid.trim() : ''))
+          .filter((uid) => AUTH_REAL_UID_REGEX.test(uid))
+      )
+    );
+
+    const bestOwnerUid =
+      (typeof best.ownerUid === 'string' && AUTH_REAL_UID_REGEX.test(best.ownerUid.trim())
+        ? best.ownerUid.trim()
+        : realOwnerUids[0]) || best.ownerUid;
+
+    const mergedSurvivor: UserAccountItem = {
+      ...best,
+      ownerUid: bestOwnerUid,
+      email: validEmailCandidate,
+      noHp: bestPhone,
+      terakhirLogin: bestLastLogin,
+      password: bestPassword,
+      ...(bestPasswordChangedAt ? { passwordChangedAt: bestPasswordChangedAt } : {}),
+      mustChangePassword: bestPasswordChangedAt
+        ? false
+        : sorted.some((c) => c.mustChangePassword === false)
+        ? false
+        : best.mustChangePassword
+    };
+
+    deduplicatedUsers.push(mergedSurvivor);
+    duplicateGroups.push({
+      key: getNormalizedUserIdentityKey(mergedSurvivor),
+      survivor: mergedSurvivor,
+      duplicates: dups,
+      distinctRealUids: realOwnerUids
+    });
+
+    dups.forEach((d) => {
+      removedUsers.push(d);
+      if (d.id) removedDocIds.push(d.id);
+    });
+  });
+
+  return {
+    deduplicatedUsers,
+    duplicateGroups,
+    removedUsers,
+    removedDocIds
+  };
+};
+
 /**
  * Sinkronisasi data dari modul Sumber Daya Manusia (Dosen, Mahasiswa, Admin, PLP)
  * ke dalam daftar Akun Pengguna (Config -> User).
@@ -169,8 +542,11 @@ export const syncSdmToUserAccounts = (
     const fullName = d.gelar ? `${d.nama}, ${d.gelar}`.trim() : d.nama.trim();
     const existingIdx = userMap.findIndex(
       (u) =>
-        u.role === 'dosen' &&
-        (isUserMatchingEntity(u, d) || (dNipClean && isIdentifierMatch(u.identifier, dNipClean)) || isNameMatch(u.nama, d.nama))
+        (dNipClean.length >= 5 &&
+          ((u.username || '').replace(/\D/g, '') === dNipClean ||
+            (u.identifier || '').replace(/\D/g, '') === dNipClean)) ||
+        (u.role === 'dosen' &&
+          (isUserMatchingEntity(u, d) || (dNipClean && isIdentifierMatch(u.identifier, dNipClean)) || isNameMatch(u.nama, d.nama)))
     );
 
     const existing = existingIdx >= 0 ? userMap[existingIdx] : undefined;
@@ -184,7 +560,7 @@ export const syncSdmToUserAccounts = (
     const unitFormatted = d.unit || (d.lab ? `${d.lab} (KBK ${d.bidang})` : `KBK ${d.bidang} - Dept Kimia FMIPA UB`);
     const jabatanFormatted = d.jabatan || `${d.jabatanAkademik || 'Dosen'} & Dosen Pembimbing Skripsi`;
     const nextAvatar = getInitials(d.nama);
-    const nextEmail = d.email || existing?.email || '';
+    const nextEmail = sanitizeUserEmail(d.email, 'dosen', dNipClean, existing?.email);
     const nextNoHp = d.telepon !== undefined && d.telepon !== '' ? d.telepon : (existing?.noHp || '');
 
     if (existingIdx >= 0 && existing) {
@@ -200,8 +576,10 @@ export const syncSdmToUserAccounts = (
         (existing.noHp || '') !== nextNoHp;
 
       if (hasChanges) {
+        const usernameChanged = existing.username !== nextUsername;
         userMap[existingIdx] = {
           ...existing,
+          ...(usernameChanged ? { ownerUid: 'unlinked-pending' } : {}),
           username: nextUsername,
           nama: fullName,
           avatarText: nextAvatar,
@@ -216,37 +594,44 @@ export const syncSdmToUserAccounts = (
       }
     } else {
       const username = dNipClean || generateUsername(d.nama, '', 'dosen');
-      const newUser: UserAccountItem = {
-        id: `usr-dos-${(d.id || '').replace(/^dos-/, '') || Date.now()}`,
-        username,
-        password: 'Dosen@123',
-        nama: fullName,
-        role: 'dosen',
-        identifier: identifierFormatted,
-        email: d.email || `${username}@ub.ac.id`,
-        avatarText: nextAvatar,
-        unit: unitFormatted,
-        jabatan: jabatanFormatted,
-        status: userStatus,
-        tanggalDibuat: new Date().toISOString().split('T')[0],
-        terakhirLogin: 'Belum pernah login',
-        noHp: d.telepon || ''
-      };
-      userMap.push(newUser);
-      addedCount++;
+      const conflict = findDuplicateUserConflict(userMap, { username, identifier: identifierFormatted, role: 'dosen' });
+      if (!conflict) {
+        const newUser: UserAccountItem = {
+          id: `usr-dos-${(d.id || '').replace(/^dos-/, '') || Date.now()}`,
+          ownerUid: 'unlinked-pending',
+          username,
+          password: 'Dosen@123',
+          nama: fullName,
+          role: 'dosen',
+          identifier: identifierFormatted,
+          email: sanitizeUserEmail(d.email, 'dosen', dNipClean),
+          avatarText: nextAvatar,
+          unit: unitFormatted,
+          jabatan: jabatanFormatted,
+          status: userStatus,
+          tanggalDibuat: new Date().toISOString().split('T')[0],
+          terakhirLogin: 'Belum pernah login',
+          noHp: d.telepon || ''
+        };
+        userMap.push(newUser);
+        addedCount++;
+      }
     }
   });
 
   // 2. SINKRONISASI MAHASISWA
   mahasiswaList.forEach((m) => {
+    const nimClean = (m.nim || '').replace(/\D/g, '');
     const existingIdx = userMap.findIndex(
       (u) =>
-        isMahasiswaRole(u.role) &&
-        (isUserMatchingEntity(u, m) || isIdentifierMatch(u.identifier, m.nim) || isNameMatch(u.nama, m.nama))
+        (nimClean.length >= 5 &&
+          ((u.username || '').replace(/\D/g, '') === nimClean ||
+            (u.identifier || '').replace(/\D/g, '') === nimClean)) ||
+        (isMahasiswaRole(u.role) &&
+          (isUserMatchingEntity(u, m) || isIdentifierMatch(u.identifier, m.nim) || isNameMatch(u.nama, m.nama)))
     );
 
     const existing = existingIdx >= 0 ? userMap[existingIdx] : undefined;
-    const nimClean = (m.nim || '').replace(/\D/g, '');
     const userStatus: 'Aktif' | 'Nonaktif' = m.status === 'Aktif' ? 'Aktif' : 'Nonaktif';
     const identifierFormatted = `NIM. ${m.nim}`;
     const nextUsername = nimClean || existing?.username || generateUsername(m.nama, m.nim, 'mhs');
@@ -264,7 +649,7 @@ export const syncSdmToUserAccounts = (
         ? `Mahasiswa Aktif Semester ${m.semester} (Dosen PA: ${m.dosenPANama})`
         : `Mahasiswa Aktif Semester ${m.semester}`);
     const nextAvatar = getInitials(m.nama);
-    const nextEmail = m.email || existing?.email || `${nextUsername}@student.ub.ac.id`;
+    const nextEmail = sanitizeUserEmail(m.email, existing?.role || 'mahasiswa_s1', nimClean, existing?.email);
     const nextNoHp = m.telepon !== undefined && m.telepon !== '' ? m.telepon : (existing?.noHp || '');
 
     if (existingIdx >= 0 && existing) {
@@ -280,8 +665,10 @@ export const syncSdmToUserAccounts = (
         (existing.noHp || '') !== nextNoHp;
 
       if (hasChanges) {
+        const usernameChanged = existing.username !== nextUsername;
         userMap[existingIdx] = {
           ...existing,
+          ...(usernameChanged ? { ownerUid: 'unlinked-pending' } : {}),
           username: nextUsername,
           nama: m.nama,
           avatarText: nextAvatar,
@@ -296,43 +683,51 @@ export const syncSdmToUserAccounts = (
       }
     } else {
       const username = nimClean || generateUsername(m.nama, m.nim, 'mhs');
-      const newUser: UserAccountItem = {
-        id: `usr-mhs-${(m.id || '').replace(/^mhs-/, '') || Date.now()}`,
-        username,
-        password: 'Mhs#2024',
-        nama: m.nama,
-        role: inferMahasiswaRoleFromText(m.programStudi || m.unit),
-        identifier: identifierFormatted,
-        email: m.email || `${username}@student.ub.ac.id`,
-        avatarText: nextAvatar,
-        unit: unitFormatted,
-        jabatan: jabatanFormatted,
-        status: userStatus,
-        tanggalDibuat: new Date().toISOString().split('T')[0],
-        terakhirLogin: 'Belum pernah login',
-        noHp: m.telepon || ''
-      };
-      userMap.push(newUser);
-      addedCount++;
+      const inferredRole = inferMahasiswaRoleFromText(m.programStudi || m.unit);
+      const conflict = findDuplicateUserConflict(userMap, { username, identifier: identifierFormatted, role: inferredRole });
+      if (!conflict) {
+        const newUser: UserAccountItem = {
+          id: `usr-mhs-${(m.id || '').replace(/^mhs-/, '') || Date.now()}`,
+          ownerUid: 'unlinked-pending',
+          username,
+          password: 'Mhs#2024',
+          nama: m.nama,
+          role: inferredRole,
+          identifier: identifierFormatted,
+          email: sanitizeUserEmail(m.email, inferredRole, nimClean),
+          avatarText: nextAvatar,
+          unit: unitFormatted,
+          jabatan: jabatanFormatted,
+          status: userStatus,
+          tanggalDibuat: new Date().toISOString().split('T')[0],
+          terakhirLogin: 'Belum pernah login',
+          noHp: m.telepon || ''
+        };
+        userMap.push(newUser);
+        addedCount++;
+      }
     }
   });
 
   // 3. SINKRONISASI ADMIN
   adminList.forEach((a) => {
+    const nipClean = (a.nip || '').replace(/\D/g, '');
     const fullName = a.gelar ? `${a.nama}, ${a.gelar}` : a.nama;
     const existingIdx = userMap.findIndex(
       (u) =>
-        u.role === 'admin' &&
-        (isUserMatchingEntity(u, a) || isIdentifierMatch(u.identifier, a.nip) || isNameMatch(u.nama, a.nama))
+        (nipClean.length >= 5 &&
+          ((u.username || '').replace(/\D/g, '') === nipClean ||
+            (u.identifier || '').replace(/\D/g, '') === nipClean)) ||
+        (u.role === 'admin' &&
+          (isUserMatchingEntity(u, a) || isIdentifierMatch(u.identifier, a.nip) || isNameMatch(u.nama, a.nama)))
     );
 
     const existing = existingIdx >= 0 ? userMap[existingIdx] : undefined;
-    const nipClean = (a.nip || '').replace(/\D/g, '');
     const userStatus: 'Aktif' | 'Nonaktif' = a.status === 'Aktif' ? 'Aktif' : 'Nonaktif';
     const identifierFormatted = a.nip ? `NIP. ${a.nip}` : (existing?.identifier || '');
     const nextUsername = nipClean || existing?.username || generateUsername(a.nama, a.nip, 'admin');
     const nextAvatar = getInitials(a.nama);
-    const nextEmail = a.email || existing?.email || '';
+    const nextEmail = sanitizeUserEmail(a.email, 'admin', nipClean, existing?.email);
     const nextUnit = a.unit || existing?.unit || '';
     const nextJabatan = a.jabatan || existing?.jabatan || '';
     const nextNoHp = a.telepon || existing?.noHp || '';
@@ -350,8 +745,10 @@ export const syncSdmToUserAccounts = (
         (existing.noHp || '') !== nextNoHp;
 
       if (hasChanges) {
+        const usernameChanged = existing.username !== nextUsername;
         userMap[existingIdx] = {
           ...existing,
+          ...(usernameChanged ? { ownerUid: 'unlinked-pending' } : {}),
           username: nextUsername,
           nama: fullName,
           avatarText: nextAvatar,
@@ -366,44 +763,51 @@ export const syncSdmToUserAccounts = (
       }
     } else {
       const username = nipClean || generateUsername(a.nama, a.nip, 'admin');
-      const newUser: UserAccountItem = {
-        id: `usr-adm-${(a.id || '').replace(/^adm-/, '') || Date.now()}`,
-        username,
-        password: 'Admin@123',
-        nama: fullName,
-        role: 'admin',
-        identifier: identifierFormatted,
-        email: a.email || `${username}@ub.ac.id`,
-        avatarText: nextAvatar,
-        unit: a.unit,
-        jabatan: a.jabatan,
-        status: userStatus,
-        tanggalDibuat: new Date().toISOString().split('T')[0],
-        terakhirLogin: 'Belum pernah login',
-        noHp: a.telepon || ''
-      };
-      userMap.push(newUser);
-      addedCount++;
+      const conflict = findDuplicateUserConflict(userMap, { username, identifier: identifierFormatted, role: 'admin' });
+      if (!conflict) {
+        const newUser: UserAccountItem = {
+          id: `usr-adm-${(a.id || '').replace(/^adm-/, '') || Date.now()}`,
+          ownerUid: 'unlinked-pending',
+          username,
+          password: 'Admin@123',
+          nama: fullName,
+          role: 'admin',
+          identifier: identifierFormatted,
+          email: sanitizeUserEmail(a.email, 'admin', nipClean),
+          avatarText: nextAvatar,
+          unit: a.unit,
+          jabatan: a.jabatan,
+          status: userStatus,
+          tanggalDibuat: new Date().toISOString().split('T')[0],
+          terakhirLogin: 'Belum pernah login',
+          noHp: a.telepon || ''
+        };
+        userMap.push(newUser);
+        addedCount++;
+      }
     }
   });
 
   // 4. SINKRONISASI PLP
   plpList.forEach((p) => {
+    const nipClean = (p.nip || '').replace(/\D/g, '');
     const fullName = p.gelar ? `${p.nama}, ${p.gelar}` : p.nama;
     const existingIdx = userMap.findIndex(
       (u) =>
-        u.role === 'admin' &&
-        (isUserMatchingEntity(u, p) || isIdentifierMatch(u.identifier, p.nip) || isNameMatch(u.nama, p.nama))
+        (nipClean.length >= 5 &&
+          ((u.username || '').replace(/\D/g, '') === nipClean ||
+            (u.identifier || '').replace(/\D/g, '') === nipClean)) ||
+        (u.role === 'admin' &&
+          (isUserMatchingEntity(u, p) || isIdentifierMatch(u.identifier, p.nip) || isNameMatch(u.nama, p.nama)))
     );
 
     const existing = existingIdx >= 0 ? userMap[existingIdx] : undefined;
-    const nipClean = (p.nip || '').replace(/\D/g, '');
     const userStatus: 'Aktif' | 'Nonaktif' = p.status === 'Aktif' ? 'Aktif' : 'Nonaktif';
     const identifierFormatted = p.nip ? `NIP. ${p.nip}` : (existing?.identifier || '');
     const nextUsername = nipClean || existing?.username || generateUsername(p.nama, p.nip, 'plp');
     const jabatanFormatted = p.jabatan || `Pranata Laboratorium Pendidikan (${p.jenjang})`;
     const nextAvatar = getInitials(p.nama);
-    const nextEmail = p.email || existing?.email || '';
+    const nextEmail = sanitizeUserEmail(p.email, 'admin', nipClean, existing?.email);
     const nextUnit = p.labUtama || existing?.unit || '';
     const nextNoHp = p.telepon || existing?.noHp || '';
 
@@ -420,8 +824,10 @@ export const syncSdmToUserAccounts = (
         (existing.noHp || '') !== nextNoHp;
 
       if (hasChanges) {
+        const usernameChanged = existing.username !== nextUsername;
         userMap[existingIdx] = {
           ...existing,
+          ...(usernameChanged ? { ownerUid: 'unlinked-pending' } : {}),
           username: nextUsername,
           nama: fullName,
           avatarText: nextAvatar,
@@ -436,24 +842,28 @@ export const syncSdmToUserAccounts = (
       }
     } else {
       const username = nipClean || generateUsername(p.nama, p.nip, 'plp');
-      const newUser: UserAccountItem = {
-        id: `usr-plp-${(p.id || '').replace(/^plp-/, '') || Date.now()}`,
-        username,
-        password: 'Labor@123',
-        nama: fullName,
-        role: 'admin',
-        identifier: identifierFormatted,
-        email: p.email || `${username}@ub.ac.id`,
-        avatarText: nextAvatar,
-        unit: p.labUtama,
-        jabatan: jabatanFormatted,
-        status: userStatus,
-        tanggalDibuat: new Date().toISOString().split('T')[0],
-        terakhirLogin: 'Belum pernah login',
-        noHp: p.telepon || ''
-      };
-      userMap.push(newUser);
-      addedCount++;
+      const conflict = findDuplicateUserConflict(userMap, { username, identifier: identifierFormatted, role: 'admin' });
+      if (!conflict) {
+        const newUser: UserAccountItem = {
+          id: `usr-plp-${(p.id || '').replace(/^plp-/, '') || Date.now()}`,
+          ownerUid: 'unlinked-pending',
+          username,
+          password: 'Labor@123',
+          nama: fullName,
+          role: 'admin',
+          identifier: identifierFormatted,
+          email: sanitizeUserEmail(p.email, 'admin', nipClean),
+          avatarText: nextAvatar,
+          unit: p.labUtama,
+          jabatan: jabatanFormatted,
+          status: userStatus,
+          tanggalDibuat: new Date().toISOString().split('T')[0],
+          terakhirLogin: 'Belum pernah login',
+          noHp: p.telepon || ''
+        };
+        userMap.push(newUser);
+        addedCount++;
+      }
     }
   });
 
@@ -515,24 +925,27 @@ export const syncSdmToUserAccounts = (
       }
     } else {
       const username = p.username || generateUsername(p.nama, p.idMitra, 'pbl');
-      const newUser: UserAccountItem = {
-        id: `usr-pbl-${(p.id || '').replace(/^pbl-/, '') || Date.now()}`,
-        username,
-        password: 'Pembimbing@123',
-        nama: fullName,
-        role: 'eksternal',
-        identifier: identifierFormatted,
-        email: p.email || `${username}@mitra.ac.id`,
-        avatarText: nextAvatar,
-        unit: p.namaMitra,
-        jabatan: p.jabatan || 'Pembimbing Lapangan',
-        status: userStatus,
-        tanggalDibuat: new Date().toISOString().split('T')[0],
-        terakhirLogin: 'Belum pernah login',
-        noHp: p.telepon || ''
-      };
-      userMap.push(newUser);
-      addedCount++;
+      const conflict = findDuplicateUserConflict(userMap, { username, identifier: identifierFormatted, role: 'eksternal', jabatan: 'Pembimbing Lapangan' });
+      if (!conflict) {
+        const newUser: UserAccountItem = {
+          id: `usr-pbl-${(p.id || '').replace(/^pbl-/, '') || Date.now()}`,
+          username,
+          password: 'Pembimbing@123',
+          nama: fullName,
+          role: 'eksternal',
+          identifier: identifierFormatted,
+          email: p.email || `${username}@mitra.ac.id`,
+          avatarText: nextAvatar,
+          unit: p.namaMitra,
+          jabatan: p.jabatan || 'Pembimbing Lapangan',
+          status: userStatus,
+          tanggalDibuat: new Date().toISOString().split('T')[0],
+          terakhirLogin: 'Belum pernah login',
+          noHp: p.telepon || ''
+        };
+        userMap.push(newUser);
+        addedCount++;
+      }
     }
   });
 

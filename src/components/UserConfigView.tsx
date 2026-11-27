@@ -41,7 +41,7 @@ import {
   ChevronsRight
 } from 'lucide-react';
 import { UserRole, AuthUser, Dosen, Mahasiswa, AdminStaff, PLPStaff, PembimbingLapanganStaff, PengajuanKLK, LogbookLabItem, JadwalSeminar, SuratPengajuan, isMahasiswaRole, getUserRoleLabel, normalizeMahasiswaRole } from '../types/sikma';
-import { auth, db, provisionUserAuthAccount } from '../firebase';
+import { auth, db, provisionUserAuthAccount, ensureUserAuthLinked, isRealFirebaseUid } from '../firebase';
 import { doc, getDoc, setDoc, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import {
   sanitizeDocId,
@@ -49,6 +49,9 @@ import {
   syncAdminRegistryForUser,
   removeAdminRegistryByEmail,
   usernameToAuthEmail,
+  provisionAndLinkUsersBatch,
+  buildUserDocPayload,
+  BatchAuthProvisionProgress,
   ZUPER_ADMIN_EMAIL
 } from '../utils/firestoreSync';
 import { formatTerakhirLogin } from '../utils/lastLoginFormat';
@@ -69,7 +72,14 @@ import {
   syncUserDeleteToSdm,
   syncUserStatusToSdm,
   syncUserEditAcrossAllModules,
-  syncUserDeleteAcrossAllModules
+  syncUserDeleteAcrossAllModules,
+  getDefaultPasswordForRole,
+  getCandidateDefaultPasswords,
+  findDuplicateUserConflict,
+  deduplicateUserAccounts,
+  sanitizeUserEmail,
+  extractUserNumericIdentity,
+  isPlaceholderEmail
 } from '../utils/syncUserAndSdm';
 
 async function withFirestoreTimeout<T>(promise: Promise<T>, timeoutMs = 10000): Promise<T> {
@@ -399,50 +409,378 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
   }, [userListProp]);
 
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [isSyncingAuth, setIsSyncingAuth] = useState<boolean>(false);
+  const [isCleaningDuplicates, setIsCleaningDuplicates] = useState<boolean>(false);
+  const [syncingSingleUserId, setSyncingSingleUserId] = useState<string | null>(null);
+  const [syncProgress, setSyncProgress] = useState<BatchAuthProvisionProgress | null>(null);
+  const [authSyncIssues, setAuthSyncIssues] = useState<Record<string, 'conflict' | 'rate_limited'>>({});
 
-  const handleManualSyncSdm = () => {
-    const bidir = syncBidirectionalUsersAndSdm(
-      userList,
+  const isUserAuthSynced = (u: UserAccountItem): boolean => {
+    if (isRealFirebaseUid(u.ownerUid)) return true;
+    if (u.role === 'super_admin' && (u.username || '').trim().toLowerCase() === 'superadmin' && auth.currentUser?.email?.toLowerCase() === ZUPER_ADMIN_EMAIL) {
+      return true;
+    }
+    return false;
+  };
+
+  const duplicateUsersInfo = useMemo(
+    () =>
+      deduplicateUserAccounts(userList, {
+        dosenList,
+        mahasiswaList,
+        adminList,
+        plpList
+      }),
+    [userList, dosenList, mahasiswaList, adminList, plpList]
+  );
+
+  const unlinkedAuthUsersCount = useMemo(
+    () => userList.filter((u) => u.status === 'Aktif' && !isUserAuthSynced(u)).length,
+    [userList]
+  );
+
+  const conflictAuthUsersCount = useMemo(
+    () =>
+      userList.filter(
+        (u) => u.status === 'Aktif' && !isUserAuthSynced(u) && authSyncIssues[u.id] === 'conflict'
+      ).length,
+    [userList, authSyncIssues]
+  );
+
+  const cleanupDuplicateUsersInternal = async (
+    inputUsers: UserAccountItem[]
+  ): Promise<{
+    cleanedUsers: UserAccountItem[];
+    mergedGroupsCount: number;
+    deletedDocsCount: number;
+  }> => {
+    const dedupRes = deduplicateUserAccounts(inputUsers, {
       dosenList,
       mahasiswaList,
       adminList,
-      plpList,
-      pembimbingLapanganList
-    );
-    const diffSummary = syncSdmToUserAccounts(
-      userList,
-      bidir.syncedDosen,
-      bidir.syncedMahasiswa,
-      bidir.syncedAdmin,
-      bidir.syncedPlp,
-      bidir.syncedPembimbingLapangan
-    );
+      plpList
+    });
 
-    saveUsers(bidir.syncedUsers);
-    if (onSyncAllModules) {
-      onSyncAllModules(
+    const sanitizedUsers = dedupRes.deduplicatedUsers.map((u) => {
+      const numId = extractUserNumericIdentity(u);
+      let sdmEmail = '';
+      if (numId) {
+        if (isMahasiswaRole(u.role)) {
+          sdmEmail = mahasiswaList.find((m) => (m.nim || '').replace(/\D/g, '') === numId)?.email || '';
+        } else if (u.role === 'dosen') {
+          sdmEmail = dosenList.find((d) => (d.nip || '').replace(/\D/g, '') === numId)?.email || '';
+        } else if (u.role === 'admin') {
+          sdmEmail =
+            adminList.find((a) => (a.nip || '').replace(/\D/g, '') === numId)?.email ||
+            plpList.find((p) => (p.nip || '').replace(/\D/g, '') === numId)?.email ||
+            '';
+        }
+      }
+      const nextEmail = sanitizeUserEmail(u.email, u.role, numId, sdmEmail);
+      if (nextEmail !== (u.email || '') && (isPlaceholderEmail(u.email) || isMahasiswaRole(u.role))) {
+        return { ...u, email: nextEmail };
+      }
+      return u;
+    });
+
+    const mergedGroupsCount = dedupRes.duplicateGroups.length;
+    const removedIds = dedupRes.removedDocIds
+      .map((id) => sanitizeDocId(id, 'user'))
+      .filter(Boolean);
+
+    if (mergedGroupsCount === 0 && sanitizedUsers.every((u, idx) => u === dedupRes.deduplicatedUsers[idx])) {
+      return {
+        cleanedUsers: dedupRes.deduplicatedUsers,
+        mergedGroupsCount: 0,
+        deletedDocsCount: 0
+      };
+    }
+
+    // Pastikan setiap survivor pada grup ganda memiliki ownerUid Auth yang aktif untuk <username>@sikma.ub.ac.id
+    const survivorOverrides = new Map<string, UserAccountItem>();
+    for (let gIdx = 0; gIdx < dedupRes.duplicateGroups.length; gIdx++) {
+      const grp = dedupRes.duplicateGroups[gIdx];
+      let survivor = sanitizedUsers.find((u) => u.id === grp.survivor.id) || grp.survivor;
+      const needsAuthVerify = grp.distinctRealUids.length > 1 || !isRealFirebaseUid(survivor.ownerUid);
+
+      if (auth.currentUser && survivor.status === 'Aktif' && needsAuthVerify) {
+        if (gIdx > 0) {
+          await new Promise<void>((r) => setTimeout(r, 90));
+        }
+        const authEmail =
+          survivor.role === 'super_admin' && survivor.username.toLowerCase() === 'superadmin'
+            ? ZUPER_ADMIN_EMAIL
+            : usernameToAuthEmail(survivor.username);
+        const candidates = getCandidateDefaultPasswords(survivor.role, survivor.jabatan, survivor.password);
+        const linkRes = await withFirestoreTimeout(ensureUserAuthLinked(authEmail, candidates)).catch(() => null);
+        if (linkRes && (linkRes.status === 'matched' || linkRes.status === 'created' || linkRes.status === 'updated')) {
+          survivor = {
+            ...survivor,
+            ownerUid: sanitizeDocId(linkRes.uid, 'user')
+          };
+        }
+      }
+      survivorOverrides.set(survivor.id, survivor);
+    }
+
+    const finalCleanedUsers = sanitizedUsers.map((u) => survivorOverrides.get(u.id) || u);
+
+    if (auth.currentUser) {
+      // 1. Update dokumen survivor & dokumen yang emailnya diperbaiki di Firestore
+      const docsToUpdate = finalCleanedUsers.filter((u) => {
+        if (survivorOverrides.has(u.id)) return true;
+        const orig = inputUsers.find((o) => o.id === u.id);
+        return orig ? orig.email !== u.email : false;
+      });
+
+      for (const u of docsToUpdate) {
+        const docId = sanitizeDocId(u.id, 'user');
+        const userRef = doc(db, 'users', docId);
+        const payload = buildUserDocPayload(u, docId);
+        const realUid = isRealFirebaseUid(u.ownerUid) ? sanitizeDocId(u.ownerUid!, 'user') : '';
+        try {
+          const snap = await withFirestoreTimeout(getDoc(userRef));
+          if (snap.exists()) {
+            await withFirestoreTimeout(
+              updateDoc(userRef, {
+                ...payload,
+                ...(realUid ? { ownerUid: realUid } : {}),
+                updatedAt: serverTimestamp()
+              })
+            );
+          } else {
+            await withFirestoreTimeout(
+              setDoc(userRef, {
+                ...payload,
+                ownerUid: realUid || docId,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp()
+              })
+            );
+          }
+        } catch (err) {
+          console.warn(`Cleanup update survivor warning (${docId}):`, err);
+        }
+      }
+
+      // 2. Tandai deletedIds lebih dahulu agar onSnapshot tidak menghidupkan kembali duplikat, lalu hapus dari Firestore `users` (TANPA menghapus SDM!)
+      if (removedIds.length > 0) {
+        onBeforeDeleteUserIds?.(removedIds);
+        const chunkSize = 10;
+        for (let i = 0; i < removedIds.length; i += chunkSize) {
+          const chunk = removedIds.slice(i, i + chunkSize);
+          await withFirestoreTimeout(
+            Promise.all(chunk.map((dupId) => deleteDoc(doc(db, 'users', dupId)).catch(() => undefined)))
+          );
+        }
+      }
+    }
+
+    return {
+      cleanedUsers: finalCleanedUsers,
+      mergedGroupsCount,
+      deletedDocsCount: removedIds.length
+    };
+  };
+
+  const handleCleanupDuplicateUsers = async () => {
+    if (duplicateUsersInfo.duplicateGroups.length === 0) return;
+    if (!auth.currentUser) {
+      setSyncNotice('Sesi Firebase Auth Admin belum aktif. Silakan Logout lalu Login kembali sebelum membersihkan akun ganda.');
+      setTimeout(() => setSyncNotice(null), 6000);
+      return;
+    }
+
+    setIsCleaningDuplicates(true);
+    try {
+      const cleanRes = await cleanupDuplicateUsersInternal(userList);
+      persistUserList(cleanRes.cleanedUsers);
+      if (onSyncAllModules) {
+        onSyncAllModules(
+          dosenList,
+          mahasiswaList,
+          adminList,
+          plpList,
+          klkList,
+          cleanRes.cleanedUsers,
+          pembimbingLapanganList,
+          logbooks,
+          seminarList,
+          suratList,
+          { skipReverseSdmUserCreation: true }
+        );
+      } else if (onUpdateUserList) {
+        onUpdateUserList(cleanRes.cleanedUsers);
+      }
+      setSyncNotice(
+        `Pembersihan Akun Ganda Selesai! ${cleanRes.mergedGroupsCount} pengguna ganda berhasil digabungkan (${cleanRes.deletedDocsCount} dokumen duplikat dihapus dari Firestore). Data SDM (Mahasiswa/Dosen/Admin/PLP) tetap aman utuh & total pengguna kini ${cleanRes.cleanedUsers.length} akun unik.`
+      );
+      setTimeout(() => setSyncNotice(null), 10000);
+    } catch (err: unknown) {
+      setSyncNotice(`Gagal membersihkan akun ganda: ${formatFirestoreWriteError(err)}`);
+      setTimeout(() => setSyncNotice(null), 8000);
+    } finally {
+      setIsCleaningDuplicates(false);
+    }
+  };
+
+  const handleSyncSingleUserAuth = async (targetUser: UserAccountItem) => {
+    if (!auth.currentUser) {
+      setSyncNotice('Sesi Firebase Auth Admin belum aktif. Silakan Logout lalu Login kembali.');
+      return;
+    }
+    setSyncingSingleUserId(targetUser.id);
+    try {
+      const summary = await provisionAndLinkUsersBatch([targetUser], auth.currentUser, {
+        onlyUnlinked: false,
+        includeSuperAdmin: false
+      });
+      if (summary.linkedCount > 0) {
+        const linked = summary.updatedUsers[0];
+        const nextList = userList.map((u) => (u.id === targetUser.id ? linked : u));
+        persistUserList(nextList);
+        if (onUpdateUserList) onUpdateUserList(nextList);
+        setAuthSyncIssues((prev) => {
+          const next = { ...prev };
+          delete next[targetUser.id];
+          return next;
+        });
+        setSyncNotice(
+          `Akun "${targetUser.nama}" (${targetUser.username}) berhasil ditautkan ke Firebase Authentication (${summary.createdCount > 0 ? 'akun login baru dibuat' : 'UID berhasil disinkronkan'}).`
+        );
+      } else if (summary.conflictUsernames.length > 0) {
+        setAuthSyncIssues((prev) => ({ ...prev, [targetUser.id]: 'conflict' }));
+        setSyncNotice(
+          `Username "${targetUser.username}" sudah terdaftar di Firebase Authentication dengan kata sandi kustom/pribadi. Kata sandi pengguna tidak ditimpa demi keamanan — pengguna tetap bisa login menggunakan sandi terakhirnya, atau hapus & buat ulang akun jika pengguna lupa sandi.`
+        );
+      } else if (summary.rateLimitedUsernames.length > 0) {
+        setAuthSyncIssues((prev) => ({ ...prev, [targetUser.id]: 'rate_limited' }));
+        setSyncNotice(
+          `Permintaan sinkronisasi untuk "${targetUser.username}" tertahan batas kecepatan sementara (rate-limit) Firebase Auth. Tunggu 15–30 detik lalu klik Sinkronkan kembali.`
+        );
+      } else {
+        setSyncNotice(`Gagal menyinkronkan autentikasi untuk "${targetUser.username}".`);
+      }
+      setTimeout(() => setSyncNotice(null), 8000);
+    } finally {
+      setSyncingSingleUserId(null);
+    }
+  };
+
+  const handleManualSyncSdm = async () => {
+    setIsSyncingAuth(true);
+    setSyncProgress(null);
+    try {
+      const cleanRes = await cleanupDuplicateUsersInternal(userList);
+      const baseCleanUsers = cleanRes.cleanedUsers;
+
+      const bidir = syncBidirectionalUsersAndSdm(
+        baseCleanUsers,
+        dosenList,
+        mahasiswaList,
+        adminList,
+        plpList,
+        pembimbingLapanganList
+      );
+      const diffSummary = syncSdmToUserAccounts(
+        baseCleanUsers,
         bidir.syncedDosen,
         bidir.syncedMahasiswa,
         bidir.syncedAdmin,
         bidir.syncedPlp,
-        klkList,
-        bidir.syncedUsers,
-        bidir.syncedPembimbingLapangan,
-        logbooks,
-        seminarList,
-        suratList
+        bidir.syncedPembimbingLapangan
       );
-    } else {
-      if (onUpdateDosenList) onUpdateDosenList(bidir.syncedDosen);
-      if (onUpdateMahasiswaList) onUpdateMahasiswaList(bidir.syncedMahasiswa);
-      if (onUpdateAdminList) onUpdateAdminList(bidir.syncedAdmin);
-      if (onUpdatePlpList) onUpdatePlpList(bidir.syncedPlp);
-      if (onUpdatePembimbingLapanganList) onUpdatePembimbingLapanganList(bidir.syncedPembimbingLapangan);
+
+      let finalUsers = deduplicateUserAccounts(bidir.syncedUsers, {
+        dosenList: bidir.syncedDosen,
+        mahasiswaList: bidir.syncedMahasiswa,
+        adminList: bidir.syncedAdmin,
+        plpList: bidir.syncedPlp
+      }).deduplicatedUsers;
+
+      let authSummary = {
+        linkedCount: 0,
+        createdCount: 0,
+        conflictUsernames: [] as string[],
+        rateLimitedUsernames: [] as string[],
+        errorCount: 0
+      };
+
+      if (auth.currentUser) {
+        const res = await provisionAndLinkUsersBatch(finalUsers, auth.currentUser, {
+          onlyUnlinked: true,
+          includeSuperAdmin: false,
+          onProgress: (p) => setSyncProgress(p)
+        });
+        finalUsers = res.updatedUsers;
+        authSummary = res;
+      }
+
+      const conflictSet = new Set(authSummary.conflictUsernames.map((x) => x.trim().toLowerCase()));
+      const rateLimitSet = new Set(authSummary.rateLimitedUsernames.map((x) => x.trim().toLowerCase()));
+      setAuthSyncIssues((prev) => {
+        const next: Record<string, 'conflict' | 'rate_limited'> = {};
+        finalUsers.forEach((u) => {
+          if (u.status !== 'Aktif' || isUserAuthSynced(u)) return;
+          const unameLower = (u.username || '').trim().toLowerCase();
+          if (conflictSet.has(unameLower)) {
+            next[u.id] = 'conflict';
+          } else if (rateLimitSet.has(unameLower)) {
+            next[u.id] = 'rate_limited';
+          } else if (prev[u.id]) {
+            next[u.id] = prev[u.id];
+          }
+        });
+        return next;
+      });
+
+      saveUsers(finalUsers);
+      if (onSyncAllModules) {
+        onSyncAllModules(
+          bidir.syncedDosen,
+          bidir.syncedMahasiswa,
+          bidir.syncedAdmin,
+          bidir.syncedPlp,
+          klkList,
+          finalUsers,
+          bidir.syncedPembimbingLapangan,
+          logbooks,
+          seminarList,
+          suratList,
+          { skipReverseSdmUserCreation: true }
+        );
+      } else {
+        if (onUpdateDosenList) onUpdateDosenList(bidir.syncedDosen);
+        if (onUpdateMahasiswaList) onUpdateMahasiswaList(bidir.syncedMahasiswa);
+        if (onUpdateAdminList) onUpdateAdminList(bidir.syncedAdmin);
+        if (onUpdatePlpList) onUpdatePlpList(bidir.syncedPlp);
+        if (onUpdatePembimbingLapanganList) onUpdatePembimbingLapanganList(bidir.syncedPembimbingLapangan);
+      }
+
+      const dedupInfo =
+        cleanRes.deletedDocsCount > 0
+          ? ` ${cleanRes.deletedDocsCount} entri akun ganda otomatis dibersihkan.`
+          : '';
+      const conflictInfo =
+        authSummary.conflictUsernames.length > 0
+          ? ` ${authSummary.conflictUsernames.length} akun (${authSummary.conflictUsernames.slice(0, 4).join(', ')}${authSummary.conflictUsernames.length > 4 ? ', ...' : ''}) sudah memiliki kata sandi kustom/pribadi di Firebase Auth sehingga sengaja tidak ditimpa.`
+          : '';
+      const rateLimitInfo =
+        authSummary.rateLimitedUsernames.length > 0
+          ? ` ${authSummary.rateLimitedUsernames.length} akun tertahan rate-limit sementara Firebase Auth — tunggu ~30 detik lalu klik tombol ini lagi.`
+          : '';
+      const otherErrors = Math.max(0, authSummary.errorCount - authSummary.rateLimitedUsernames.length);
+      const otherErrorInfo =
+        otherErrors > 0 ? ` ${otherErrors} akun gagal diproses karena kendala koneksi/validasi Auth.` : '';
+
+      setSyncNotice(
+        `Sinkronisasi 2 Arah & Auth Selesai! ${finalUsers.length} akun unik tersinkron dengan SDM (${diffSummary.addedCount} baru, ${diffSummary.updatedCount} diperbarui) serta ${authSummary.linkedCount} akun Auth berhasil ditautkan (${authSummary.createdCount} kredensial login baru dibuat).${dedupInfo}${conflictInfo}${rateLimitInfo}${otherErrorInfo}`
+      );
+      setTimeout(() => setSyncNotice(null), 10000);
+    } finally {
+      setIsSyncingAuth(false);
+      setSyncProgress(null);
     }
-    setSyncNotice(
-      `Sinkronisasi 2 Arah Selesai! Sebanyak ${bidir.syncedUsers.length} akun pengguna telah tersinkronisasi penuh dengan menu SDM & KLK (${diffSummary.addedCount} akun baru ditambahkan, ${diffSummary.updatedCount} akun diperbarui).`
-    );
-    setTimeout(() => setSyncNotice(null), 6000);
   };
 
   // Filters & Search
@@ -536,6 +874,22 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
     status: 'Aktif' as 'Aktif' | 'Nonaktif' | 'Ditangguhkan',
     noHp: ''
   });
+
+  const liveModalDuplicateConflict = useMemo(() => {
+    if (!isAddModalOpen && !editingUser) return null;
+    if (!formData.username.trim() && !formData.identifier.trim()) return null;
+    return findDuplicateUserConflict(
+      userList,
+      {
+        username: formData.username,
+        identifier: formData.identifier,
+        email: formData.email,
+        role: formData.role,
+        jabatan: formData.jabatan
+      },
+      editingUser?.id
+    );
+  }, [isAddModalOpen, editingUser, formData.username, formData.identifier, formData.email, formData.role, formData.jabatan, userList]);
 
   // Persist helper without firing conflicting multi-syncs
   const persistUserList = (updated: UserAccountItem[]) => {
@@ -815,26 +1169,35 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         }
         finalUsername = usernameDigits;
       } else {
-        const syncedDigits = cleanNum.length >= 5 ? cleanNum : usernameDigits;
-        if (syncedDigits.length >= 5) {
-          finalUsername = syncedDigits;
+        const oldUsernameDigits = (editingUser.username || '').replace(/\D/g, '');
+        const oldIdentifierDigits = (editingUser.identifier || '').replace(/\D/g, '');
+        if (usernameDigits !== oldUsernameDigits && usernameDigits.length >= 5) {
+          finalUsername = usernameDigits;
+          formattedIdentifier = isMahasiswaRole(formData.role) ? `NIM. ${usernameDigits}` : `NIP. ${usernameDigits}`;
+        } else if (cleanNum !== oldIdentifierDigits && cleanNum.length >= 5) {
+          finalUsername = cleanNum;
+        } else {
+          const syncedDigits = usernameDigits.length >= 5 ? usernameDigits : cleanNum;
+          if (syncedDigits.length >= 5) {
+            finalUsername = syncedDigits;
+          }
         }
       }
     }
 
     if (isMahasiswaRole(formData.role)) {
       const nimNum =
-        (!editingUser ? finalUsername.replace(/\D/g, '') : cleanNum) ||
+        (!editingUser ? finalUsername.replace(/\D/g, '') : (finalUsername.replace(/\D/g, '') || cleanNum)) ||
         usernameDigits ||
         `235090200${Math.floor(100000 + Math.random() * 900000)}`;
-      formattedIdentifier = formattedIdentifier.startsWith('NIM.') && editingUser ? formattedIdentifier : `NIM. ${nimNum}`;
+      formattedIdentifier = formattedIdentifier.startsWith('NIM.') && editingUser && cleanNum === nimNum ? formattedIdentifier : `NIM. ${nimNum}`;
       if (!editingUser) finalUsername = nimNum;
     } else if (formData.role === 'dosen') {
       const nipNum =
-        (!editingUser ? finalUsername.replace(/\D/g, '') : cleanNum) ||
+        (!editingUser ? finalUsername.replace(/\D/g, '') : (finalUsername.replace(/\D/g, '') || cleanNum)) ||
         usernameDigits ||
         `197${Math.floor(10000000000 + Math.random() * 90000000000)}`;
-      formattedIdentifier = formattedIdentifier.startsWith('NIP.') && editingUser ? formattedIdentifier : `NIP. ${nipNum}`;
+      formattedIdentifier = formattedIdentifier.startsWith('NIP.') && editingUser && cleanNum === nipNum ? formattedIdentifier : `NIP. ${nipNum}`;
       if (!editingUser) finalUsername = nipNum;
     } else if (isEksternalCheck) {
       const idpNum = cleanNum ? `IDP-${cleanNum.slice(-7)}` : `IDP-${Math.floor(1000000 + Math.random() * 9000000)}`;
@@ -846,10 +1209,10 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           : idpNum;
     } else if (formData.role === 'admin') {
       const nipNum =
-        (!editingUser ? finalUsername.replace(/\D/g, '') : cleanNum) ||
+        (!editingUser ? finalUsername.replace(/\D/g, '') : (finalUsername.replace(/\D/g, '') || cleanNum)) ||
         usernameDigits ||
         `1990${Math.floor(10000000 + Math.random() * 90000000)}`;
-      formattedIdentifier = formattedIdentifier.startsWith('NIP.') && editingUser ? formattedIdentifier : `NIP. ${nipNum}`;
+      formattedIdentifier = formattedIdentifier.startsWith('NIP.') && editingUser && cleanNum === nipNum ? formattedIdentifier : `NIP. ${nipNum}`;
       if (!editingUser) finalUsername = nipNum;
     } else if (formData.role === 'super_admin') {
       formattedIdentifier = formattedIdentifier || 'SA-001';
@@ -863,6 +1226,28 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         .join('')
         .toUpperCase();
     };
+
+    if (isPlaceholderEmail(trimmedEmail)) {
+      setModalError('Alamat email tidak valid atau berupa placeholder (misal _@ub.ac.id). Mohon isi alamat email resmi yang valid.');
+      return;
+    }
+
+    // Proteksi Anti-Duplikat pada Form Tambah User & Edit User
+    const duplicateConflict = findDuplicateUserConflict(
+      userList,
+      {
+        username: finalUsername,
+        identifier: formattedIdentifier,
+        email: trimmedEmail,
+        role: formData.role,
+        jabatan: formData.jabatan
+      },
+      editingUser?.id
+    );
+    if (duplicateConflict) {
+      setModalError(duplicateConflict.message);
+      return;
+    }
 
     try {
       if (!auth.currentUser) {
@@ -882,21 +1267,52 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
 
         let provisionedUid: string | undefined;
         let authPasswordConflict = false;
+        let usernameChangedNeedsPassword = false;
+        const usernameChanged = finalUsername.trim().toLowerCase() !== (editingUser.username || '').trim().toLowerCase();
+        const fallbackKnownPasswords = getCandidateDefaultPasswords(normalizedRole, formData.jabatan, editingUser.password);
+
         if (finalPassword) {
-          const provRes = await withFirestoreTimeout(provisionUserAuthAccount(authEmail, finalPassword));
-          if (provRes.status === 'created' || provRes.status === 'matched') {
+          const provRes = await withFirestoreTimeout(
+            provisionUserAuthAccount(authEmail, finalPassword, fallbackKnownPasswords)
+          );
+          if (provRes.status === 'created' || provRes.status === 'matched' || provRes.status === 'updated') {
             provisionedUid = sanitizeDocId(provRes.uid, 'user');
           } else if (provRes.status === 'exists_different_password') {
             authPasswordConflict = true;
+          } else if (provRes.status === 'rate_limited') {
+            setModalError('Permintaan Firebase Authentication sedang dibatasi sementara (rate-limit). Tunggu 15–30 detik lalu coba lagi.');
+            return;
           } else if (provRes.status === 'error') {
             setModalError(`Gagal memproses autentikasi Firebase Auth: ${provRes.message}`);
             return;
           }
+        } else if (usernameChanged || !isRealFirebaseUid(editingUser.ownerUid)) {
+          const linkRes = await withFirestoreTimeout(
+            ensureUserAuthLinked(authEmail, fallbackKnownPasswords)
+          );
+          if (linkRes.status === 'created' || linkRes.status === 'matched' || linkRes.status === 'updated') {
+            provisionedUid = sanitizeDocId(linkRes.uid, 'user');
+          } else if (linkRes.status === 'exists_different_password' && usernameChanged) {
+            usernameChangedNeedsPassword = true;
+          }
         }
 
+        if (provisionedUid) {
+          const uidConflict = userList.find(
+            (u) => u.id !== editingUser.id && (u.id === provisionedUid || u.ownerUid === provisionedUid)
+          );
+          if (uidConflict) {
+            setModalError(
+              `Kredensial Auth untuk username "${finalUsername}" sudah tertaut ke akun terdaftar (${uidConflict.nama} / @${uidConflict.username}). Edit dibatalkan untuk mencegah akun ganda.`
+            );
+            return;
+          }
+        }
+
+        const nextOwnerUidOnEdit = provisionedUid || (usernameChanged ? 'unlinked-pending' : '');
         const updatedPayload: Record<string, unknown> = {
           id: docId,
-          ...(provisionedUid ? { ownerUid: provisionedUid } : {}),
+          ...(nextOwnerUidOnEdit ? { ownerUid: nextOwnerUidOnEdit } : {}),
           username: clampStr(finalUsername, 100),
           nama: clampStr(formData.nama, 200),
           role: normalizedRole,
@@ -943,7 +1359,7 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
             ? {
                 ...u,
                 ...formData,
-                ...(provisionedUid ? { ownerUid: provisionedUid } : {}),
+                ...(nextOwnerUidOnEdit ? { ownerUid: nextOwnerUidOnEdit } : {}),
                 username: finalUsername,
                 identifier: formattedIdentifier,
                 password: hashedEditPass ? hashedEditPass : u.password,
@@ -996,10 +1412,12 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         setEditingUser(null);
         setSyncNotice(
           authPasswordConflict
-            ? `Data profil "${formData.nama}" diperbarui di Firestore, namun kata sandi Firebase Auth tidak dapat ditimpa karena akun sudah aktif dengan sandi lain (ubah sandi via menu Profile pengguna).`
-            : `Data akun "${formData.nama}" berhasil diperbarui & disimpan langsung ke server Firestore.`
+            ? `Data profil "${formData.nama}" diperbarui di Firestore, namun kata sandi Firebase Auth tidak dapat ditimpa karena akun sudah aktif dengan sandi kustom (ubah sandi via menu Profile pengguna).`
+            : usernameChangedNeedsPassword
+            ? `Data profil "${formData.nama}" (${finalUsername}) diperbarui, namun Username baru sudah terdaftar di Auth dengan sandi kustom — klik Reset Password jika perlu menautkan ulang.`
+            : `Data akun "${formData.nama}" (${finalUsername}) berhasil diperbarui & tersinkron ke server Firestore dan Firebase Authentication.`
         );
-        setTimeout(() => setSyncNotice(null), 6000);
+        setTimeout(() => setSyncNotice(null), 7000);
       } else {
         const normalizedRole = normalizeMahasiswaRole(formData.role, formData.unit);
         const normalizedStatus = formData.status === 'Nonaktif' ? 'Nonaktif' : 'Aktif';
@@ -1016,12 +1434,23 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           );
           return;
         }
+        if (provRes.status === 'rate_limited') {
+          setModalError('Permintaan pembuatan akun Firebase Auth sedang dibatasi sementara (rate-limit). Tunggu 15–30 detik lalu coba lagi.');
+          return;
+        }
         if (provRes.status === 'error') {
           setModalError(`Gagal membuat akun login Firebase Authentication: ${provRes.message}`);
           return;
         }
 
         const docId = sanitizeDocId(provRes.uid, 'user');
+        const uidCollision = userList.find((u) => u.id === docId || u.ownerUid === docId);
+        if (uidCollision) {
+          setModalError(
+            `Akun dengan UID Auth atau identitas "${finalUsername}" sudah terdaftar atas nama ${uidCollision.nama} (@${uidCollision.username}). Sistem menolak pembuatan akun ganda.`
+          );
+          return;
+        }
         onBeforeUpsertUserId?.(docId);
         const userDocRef = doc(db, 'users', docId);
 
@@ -1166,18 +1595,33 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
       return;
     }
 
-    // Hitung relasi SDM yang ikut terhapus terlebih dahulu agar langsung dihapus dari Firestore bersama dokumen users
-    const fullDel = syncUserDeleteAcrossAllModules(userToDelete, {
-      dosenList,
-      mahasiswaList,
-      adminList,
-      plpList,
-      pembimbingLapanganList,
-      klkList,
-      logbooks,
-      seminarList,
-      suratList
-    });
+    const remainingUsersAfterDelete = userList.filter((u) => u.id !== userToDelete.id);
+    const hasSiblingAccount = Boolean(findDuplicateUserConflict(remainingUsersAfterDelete, userToDelete));
+
+    // Hitung relasi SDM yang ikut terhapus HANYA jika tidak ada akun ganda tersisa untuk identitas ini
+    const fullDel = hasSiblingAccount
+      ? {
+          newDosenList: dosenList,
+          newMahasiswaList: mahasiswaList,
+          newAdminList: adminList,
+          newPlpList: plpList,
+          newPembimbingLapanganList: pembimbingLapanganList,
+          newKlkList: klkList,
+          newLogbooks: logbooks,
+          newSeminarList: seminarList,
+          newSuratList: suratList
+        }
+      : syncUserDeleteAcrossAllModules(userToDelete, {
+          dosenList,
+          mahasiswaList,
+          adminList,
+          plpList,
+          pembimbingLapanganList,
+          klkList,
+          logbooks,
+          seminarList,
+          suratList
+        });
 
     const nextPb = fullDel.newPembimbingLapanganList || pembimbingLapanganList;
     const keptDosenIds = new Set(fullDel.newDosenList.map((d) => d.id));
@@ -1186,13 +1630,15 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
     const keptPlpIds = new Set(fullDel.newPlpList.map((p) => p.id));
     const keptPbIds = new Set(nextPb.map((pb) => pb.id));
 
-    const removedSdmDocIds: string[] = [
-      ...dosenList.filter((d) => !keptDosenIds.has(d.id)).map((d) => sanitizeDocId(`dosen_${d.id}`, 'sdm')),
-      ...mahasiswaList.filter((m) => !keptMhsIds.has(m.id)).map((m) => sanitizeDocId(`mahasiswa_${m.id}`, 'sdm')),
-      ...adminList.filter((a) => !keptAdminIds.has(a.id)).map((a) => sanitizeDocId(`admin_${a.id}`, 'sdm')),
-      ...plpList.filter((p) => !keptPlpIds.has(p.id)).map((p) => sanitizeDocId(`plp_${p.id}`, 'sdm')),
-      ...pembimbingLapanganList.filter((pb) => !keptPbIds.has(pb.id)).map((pb) => sanitizeDocId(`pembimbing_lapangan_${pb.id}`, 'sdm'))
-    ];
+    const removedSdmDocIds: string[] = hasSiblingAccount
+      ? []
+      : [
+          ...dosenList.filter((d) => !keptDosenIds.has(d.id)).map((d) => sanitizeDocId(`dosen_${d.id}`, 'sdm')),
+          ...mahasiswaList.filter((m) => !keptMhsIds.has(m.id)).map((m) => sanitizeDocId(`mahasiswa_${m.id}`, 'sdm')),
+          ...adminList.filter((a) => !keptAdminIds.has(a.id)).map((a) => sanitizeDocId(`admin_${a.id}`, 'sdm')),
+          ...plpList.filter((p) => !keptPlpIds.has(p.id)).map((p) => sanitizeDocId(`plp_${p.id}`, 'sdm')),
+          ...pembimbingLapanganList.filter((pb) => !keptPbIds.has(pb.id)).map((pb) => sanitizeDocId(`pembimbing_lapangan_${pb.id}`, 'sdm'))
+        ];
 
     setIsDeletingUser(true);
     const docId = sanitizeDocId(userToDelete.id, 'user');
@@ -1202,7 +1648,7 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
     }
     try {
       const shouldCleanAdminReg =
-        isSuperAdminRole(userToDelete.role) || userToDelete.role === 'admin';
+        !hasSiblingAccount && (isSuperAdminRole(userToDelete.role) || userToDelete.role === 'admin');
       await withFirestoreTimeout(
         Promise.all([
           deleteDoc(doc(db, 'users', docId)),
@@ -1223,7 +1669,7 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
     }
     setIsDeletingUser(false);
 
-    const updated = userList.filter((u) => u.id !== userToDelete.id);
+    const updated = remainingUsersAfterDelete;
     persistUserList(updated);
 
     if (onSyncAllModules) {
@@ -1259,7 +1705,11 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
       }
     }
 
-    setSyncNotice(`Pengguna "${userToDelete.nama}" (@${userToDelete.username}) berhasil dihapus dari server Firestore & dibersihkan dari seluruh modul.`);
+    setSyncNotice(
+      hasSiblingAccount
+        ? `Entri duplikat "${userToDelete.nama}" (@${userToDelete.username}) dihapus dari daftar User, sedangkan data SDM dipertahankan karena akun utama masih aktif.`
+        : `Pengguna "${userToDelete.nama}" (@${userToDelete.username}) berhasil dihapus dari server Firestore & dibersihkan dari seluruh modul.`
+    );
     setTimeout(() => setSyncNotice(null), 5000);
     setUserToDelete(null);
   };
@@ -1306,6 +1756,8 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
     };
 
     for (const delUser of targetUsers) {
+      const stillHasSibling = Boolean(findDuplicateUserConflict(updatedUsers, delUser));
+      if (stillHasSibling) continue;
       const res = syncUserDeleteAcrossAllModules(delUser, moduleState);
       moduleState = {
         dosenList: res.newDosenList,
@@ -1345,7 +1797,9 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         Promise.all([
           ...targetUsers.map((delUser) => {
             const docId = sanitizeDocId(delUser.id, 'user');
-            const shouldCleanAdminReg = isSuperAdminRole(delUser.role) || delUser.role === 'admin';
+            const stillHasSibling = Boolean(findDuplicateUserConflict(updatedUsers, delUser));
+            const shouldCleanAdminReg =
+              !stillHasSibling && (isSuperAdminRole(delUser.role) || delUser.role === 'admin');
             return Promise.all([
               deleteDoc(doc(db, 'users', docId)),
               shouldCleanAdminReg ? removeAdminRegistryByEmail(delUser.email) : Promise.resolve()
@@ -1521,11 +1975,22 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           setResetPassError('Sesi Firebase Auth belum aktif. Silakan Logout lalu Login kembali.');
           return;
         }
-        const provRes = await withFirestoreTimeout(provisionUserAuthAccount(authEmail, cleanNewPass));
+        const fallbackPasswords = getCandidateDefaultPasswords(
+          resetPassUser.role,
+          resetPassUser.jabatan,
+          resetPassUser.password
+        );
+        const provRes = await withFirestoreTimeout(
+          provisionUserAuthAccount(authEmail, cleanNewPass, fallbackPasswords)
+        );
         if (provRes.status === 'exists_different_password') {
           setResetPassError(
-            'Akun ini sudah memiliki kata sandi aktif di Firebase Authentication. Karena sistem berjalan tanpa Admin SDK backend, kata sandi lama di server tidak dapat ditimpa dari browser; pengguna harus login memakai sandi terakhirnya lalu mengganti sandi di menu Profile → Keamanan & Kata Sandi (atau hapus & buat ulang akun).'
+            'Akun ini sudah memiliki kata sandi kustom di Firebase Authentication yang berbeda dari kata sandi bawaan. Karena sistem berjalan tanpa Admin SDK backend, pengguna harus login memakai sandi terakhirnya lalu mengganti sandi di menu Profile → Keamanan & Kata Sandi (atau hapus & buat ulang akun).'
           );
+          return;
+        }
+        if (provRes.status === 'rate_limited') {
+          setResetPassError('Permintaan Firebase Auth sedang dibatasi sementara (rate-limit). Tunggu 15–30 detik lalu coba lagi.');
           return;
         }
         if (provRes.status === 'error') {
@@ -1533,6 +1998,11 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           return;
         }
         provisionedUid = sanitizeDocId(provRes.uid, 'user');
+        setAuthSyncIssues((prev) => {
+          const next = { ...prev };
+          delete next[resetPassUser.id];
+          return next;
+        });
 
         const docId = sanitizeDocId(resetPassUser.id, 'user');
         const userRef = doc(db, 'users', docId);
@@ -1855,14 +2325,18 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
       }
 
       const existingByUsername = new Map<string, UserAccountItem>();
+      const existingByNumericId = new Map<string, UserAccountItem>();
 
       userList.forEach((u) => {
         if (!u) return;
         const uname = (u.username || '').trim().toLowerCase();
         if (uname) existingByUsername.set(uname, u);
+        const numId = extractUserNumericIdentity(u);
+        if (numId) existingByNumericId.set(numId, u);
       });
 
       const seenInFileUsername = new Map<string, number>();
+      const seenInFileNumericId = new Map<string, number>();
       const parsed: ParsedCsvUserRow[] = [];
 
       for (let i = 1; i < matrix.length; i++) {
@@ -1901,11 +2375,14 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           ? rawUsername || rawIdentifier
           : rawUsername;
 
+        const sanitizedCsvEmail = sanitizeUserEmail(email, finalRole, resolvedNimNip);
         if (!username || !nama || !rawRole) {
           error =
             finalRole === 'eksternal'
               ? 'Kolom wajib (username / id_mitra, nama, role) belum lengkap.'
               : 'Kolom wajib (username / nim_nip, nama, role) belum lengkap.';
+        } else if (isPlaceholderEmail(email)) {
+          error = 'Alamat email berupa placeholder (misal _@ub.ac.id). Kosongkan atau isi email resmi yang valid.';
         } else if (email && !email.includes('@')) {
           error = 'Format email tidak valid.';
         }
@@ -1931,26 +2408,35 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           finalJabatan
         );
 
-        // Validasi anti-duplikat internal file CSV (Username saja)
+        // Validasi anti-duplikat internal file CSV (Username & NIM/NIP)
         const dupCsvUnameRow = normalizedUname ? seenInFileUsername.get(normalizedUname) : undefined;
+        const dupCsvNumRow = isIdUsernameRole && resolvedNimNip.length >= 5 ? seenInFileNumericId.get(resolvedNimNip) : undefined;
 
         if (!error && dupCsvUnameRow !== undefined) {
           error = `Duplikat di CSV: username "${username}" sama dengan baris #${dupCsvUnameRow}.`;
+        } else if (!error && dupCsvNumRow !== undefined) {
+          error = `Duplikat di CSV: NIM/NIP "${resolvedNimNip}" sama dengan baris #${dupCsvNumRow}.`;
         }
 
         if (normalizedUname && !seenInFileUsername.has(normalizedUname)) {
           seenInFileUsername.set(normalizedUname, rowNum);
         }
+        if (isIdUsernameRole && resolvedNimNip.length >= 5 && !seenInFileNumericId.has(resolvedNimNip)) {
+          seenInFileNumericId.set(resolvedNimNip, rowNum);
+        }
 
-        // Validasi anti-duplikat terhadap akun terdaftar di SIKMA (Username saja)
+        // Validasi anti-duplikat terhadap akun terdaftar di SIKMA (Username & NIM/NIP)
         const matchByUname = normalizedUname ? existingByUsername.get(normalizedUname) : undefined;
-        const matchedExisting = matchByUname;
+        const matchByNum = isIdUsernameRole && resolvedNimNip.length >= 5 ? existingByNumericId.get(resolvedNimNip) : undefined;
+        const matchedExisting = matchByUname || matchByNum;
 
         let duplicateType: ParsedCsvUserRow['duplicateType'];
         let duplicateReason: string | undefined;
-        if (matchByUname) {
+        if (matchedExisting) {
           duplicateType = 'username';
-          duplicateReason = `Username "${matchByUname.username}" sudah terdaftar (${matchByUname.nama})`;
+          duplicateReason = matchByUname
+            ? `Username "${matchByUname.username}" sudah terdaftar (${matchByUname.nama})`
+            : `NIM/NIP "${resolvedNimNip}" sudah terdaftar (${matchedExisting.nama} / @${matchedExisting.username})`;
         }
 
         const passwordAutoGenerated = !rawPass;
@@ -1971,7 +2457,7 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           nama,
           role: finalRole,
           rawRole,
-          email,
+          email: sanitizedCsvEmail,
           identifier,
           unit: finalUnit,
           jabatan: finalJabatan,
@@ -2035,6 +2521,11 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
 
     if (actionableRows.length === 0 || isImportingCsv) return;
 
+    if (!auth.currentUser) {
+      setImportParseError('Sesi Firebase Auth belum aktif. Silakan Logout lalu Login kembali sebelum mengimpor user.');
+      return;
+    }
+
     setIsImportingCsv(true);
 
     try {
@@ -2046,24 +2537,69 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         })
       );
 
-      // Provision Firebase Auth accounts sequentially for newly imported users
+      // Provision / link Firebase Auth accounts sequentially with pacing & rate-limit retry
       const provisionedUids: Array<string | undefined> = [];
-      for (const row of actionableRows) {
+      const authFailedRows: string[] = [];
+      const authConflictUpdateRows: string[] = [];
+
+      for (let rIdx = 0; rIdx < actionableRows.length; rIdx++) {
+        const row = actionableRows[rIdx];
+        if (rIdx > 0 && actionableRows.length > 5) {
+          await new Promise<void>((r) => setTimeout(r, 120));
+        }
+
         const normUname = row.username.trim().toLowerCase();
-        const existingIdx = userList.findIndex((u) => {
-          if (row.matchedExistingId && u.id === row.matchedExistingId) return true;
-          return u.username.trim().toLowerCase() === normUname;
+        const rowNumId = extractUserNumericIdentity({
+          username: row.username,
+          identifier: row.identifier,
+          role: row.role
         });
-        if (existingIdx === -1 && auth.currentUser) {
-          const authEmail =
-            row.role === 'super_admin' && normUname === 'superadmin'
-              ? ZUPER_ADMIN_EMAIL
-              : usernameToAuthEmail(row.username);
-          const provRes = await provisionUserAuthAccount(authEmail, row.password).catch(() => null);
-          if (provRes && (provRes.status === 'created' || provRes.status === 'matched')) {
+        const existingUser = userList.find((u) => {
+          if (row.matchedExistingId && u.id === row.matchedExistingId) return true;
+          if (u.username.trim().toLowerCase() === normUname) return true;
+          if (rowNumId && extractUserNumericIdentity(u) === rowNumId) return true;
+          return false;
+        });
+
+        const authEmail =
+          row.role === 'super_admin' && normUname === 'superadmin'
+            ? ZUPER_ADMIN_EMAIL
+            : usernameToAuthEmail(row.username);
+
+        if (!existingUser) {
+          let provRes = await provisionUserAuthAccount(authEmail, row.password).catch(() => null);
+          if (provRes?.status === 'rate_limited') {
+            await new Promise<void>((r) => setTimeout(r, 2500));
+            provRes = await provisionUserAuthAccount(authEmail, row.password).catch(() => null);
+          }
+          if (provRes && (provRes.status === 'created' || provRes.status === 'matched' || provRes.status === 'updated')) {
             provisionedUids.push(sanitizeDocId(provRes.uid, 'user'));
           } else {
             provisionedUids.push(undefined);
+            authFailedRows.push(row.username);
+          }
+        } else if (!row.passwordAutoGenerated || !isRealFirebaseUid(existingUser.ownerUid)) {
+          const fallbackPasswords = getCandidateDefaultPasswords(
+            row.role,
+            row.jabatan,
+            existingUser.password
+          );
+          let linkRes = !row.passwordAutoGenerated
+            ? await provisionUserAuthAccount(authEmail, row.password, fallbackPasswords).catch(() => null)
+            : await ensureUserAuthLinked(authEmail, fallbackPasswords).catch(() => null);
+          if (linkRes?.status === 'rate_limited') {
+            await new Promise<void>((r) => setTimeout(r, 2500));
+            linkRes = !row.passwordAutoGenerated
+              ? await provisionUserAuthAccount(authEmail, row.password, fallbackPasswords).catch(() => null)
+              : await ensureUserAuthLinked(authEmail, fallbackPasswords).catch(() => null);
+          }
+          if (linkRes && (linkRes.status === 'created' || linkRes.status === 'matched' || linkRes.status === 'updated')) {
+            provisionedUids.push(sanitizeDocId(linkRes.uid, 'user'));
+          } else {
+            provisionedUids.push(undefined);
+            if (!row.passwordAutoGenerated && linkRes?.status === 'exists_different_password') {
+              authConflictUpdateRows.push(row.username);
+            }
           }
         } else {
           provisionedUids.push(undefined);
@@ -2096,22 +2632,33 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
       let updatedCount = 0;
       const today = new Date().toISOString().split('T')[0];
 
-      // Guard anti-duplikat selama proses batch import (deteksi duplikasi username saja)
+      // Guard anti-duplikat selama proses batch import (username & NIM/NIP)
       const seenUsernamesRun = new Set<string>();
+      const seenNumericIdsRun = new Set<string>();
 
       actionableRows.forEach((row, idx) => {
         const finalStoredPassword = processedPasswords[idx];
         const provisionedUid = provisionedUids[idx];
         const normUname = row.username.trim().toLowerCase();
+        const rowNumId = extractUserNumericIdentity({
+          username: row.username,
+          identifier: row.identifier,
+          role: row.role
+        });
 
-        // Pastikan tidak ada duplikat username lolos di batch yang sama
+        // Pastikan tidak ada duplikat username atau NIM/NIP lolos di batch yang sama
         if (!normUname || seenUsernamesRun.has(normUname)) {
+          return;
+        }
+        if (rowNumId && seenNumericIdsRun.has(rowNumId)) {
           return;
         }
 
         const existingIdx = nextUsers.findIndex((u) => {
           if (row.matchedExistingId && u.id === row.matchedExistingId) return true;
-          return u.username.trim().toLowerCase() === normUname;
+          if (u.username.trim().toLowerCase() === normUname) return true;
+          if (rowNumId && extractUserNumericIdentity(u) === rowNumId) return true;
+          return false;
         });
 
         if (existingIdx !== -1 && importDuplicateMode === 'skip') {
@@ -2119,16 +2666,27 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         }
 
         seenUsernamesRun.add(normUname);
+        if (rowNumId) seenNumericIdsRun.add(rowNumId);
 
         if (existingIdx !== -1 && importDuplicateMode === 'update') {
           const oldUser = nextUsers[existingIdx];
           if (oldUser.role === 'super_admin' && currentRole !== 'super_admin') {
             return;
           }
+          const uidTakenByOther = provisionedUid
+            ? nextUsers.some((u, uIdx) => uIdx !== existingIdx && (u.id === provisionedUid || u.ownerUid === provisionedUid))
+            : false;
+          const safeProvisionedUid = !uidTakenByOther ? provisionedUid : undefined;
+          const hadAuthPasswordConflict = authConflictUpdateRows.includes(row.username);
+
           const updatedUser: UserAccountItem = {
             ...oldUser,
+            ...(safeProvisionedUid ? { ownerUid: safeProvisionedUid } : {}),
             username: row.username,
-            password: row.passwordAutoGenerated ? (oldUser.password || finalStoredPassword) : finalStoredPassword,
+            password:
+              row.passwordAutoGenerated || hadAuthPasswordConflict
+                ? oldUser.password || finalStoredPassword
+                : finalStoredPassword,
             nama: row.nama,
             role: row.role,
             email: row.email || oldUser.email,
@@ -2156,10 +2714,20 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
             suratList: editRes.newSuratList ?? moduleState.suratList
           };
         } else if (existingIdx === -1) {
-          const newDocId = provisionedUid || `usr-${Date.now().toString().slice(-4)}${idx}`;
+          // Tolak membuat entri Firestore tanpa UID Auth agar tidak menimbulkan akun gagal login / tak tertaut
+          if (!provisionedUid) {
+            return;
+          }
+          const uidCollision = nextUsers.some((u) => u.id === provisionedUid || u.ownerUid === provisionedUid);
+          if (uidCollision) {
+            return;
+          }
+
+          const newDocId = provisionedUid;
+          onBeforeUpsertUserId?.(newDocId);
           const newUser: UserAccountItem = {
             id: newDocId,
-            ...(provisionedUid ? { ownerUid: provisionedUid } : {}),
+            ownerUid: newDocId,
             username: row.username,
             password: finalStoredPassword,
             nama: row.nama,
@@ -2197,7 +2765,14 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         }
       });
 
-      persistUserList(nextUsers);
+      const finalDedupUsers = deduplicateUserAccounts(nextUsers, {
+        dosenList: moduleState.dosenList,
+        mahasiswaList: moduleState.mahasiswaList,
+        adminList: moduleState.adminList,
+        plpList: moduleState.plpList
+      }).deduplicatedUsers;
+
+      persistUserList(finalDedupUsers);
 
       if (onSyncAllModules) {
         onSyncAllModules(
@@ -2206,11 +2781,12 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           moduleState.adminList,
           moduleState.plpList,
           moduleState.klkList,
-          nextUsers,
+          finalDedupUsers,
           moduleState.pembimbingLapanganList,
           moduleState.logbooks,
           moduleState.seminarList,
-          moduleState.suratList
+          moduleState.suratList,
+          { skipReverseSdmUserCreation: true }
         );
       } else {
         if (onUpdateDosenList) onUpdateDosenList(moduleState.dosenList);
@@ -2218,17 +2794,25 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         if (onUpdateAdminList) onUpdateAdminList(moduleState.adminList);
         if (onUpdatePlpList) onUpdatePlpList(moduleState.plpList);
         if (onUpdatePembimbingLapanganList) onUpdatePembimbingLapanganList(moduleState.pembimbingLapanganList);
-        if (onUpdateUserList) onUpdateUserList(nextUsers);
+        if (onUpdateUserList) onUpdateUserList(finalDedupUsers);
       }
 
       const skippedCount = Math.max(0, importPreviewRows.length - addedCount - updatedCount);
+      const authWarn =
+        authFailedRows.length > 0
+          ? ` ${authFailedRows.length} baris dilewati karena kredensial Auth bentrok sandi kustom/gagal dibuat (${authFailedRows.slice(0, 3).join(', ')}).`
+          : '';
+      const conflictUpdateWarn =
+        authConflictUpdateRows.length > 0
+          ? ` ${authConflictUpdateRows.length} akun pembaruan memakai sandi kustom di Auth sehingga sandi Auth tidak ditimpa.`
+          : '';
       setIsImportModalOpen(false);
       setImportPreviewRows([]);
       setImportFileName('');
       setSyncNotice(
-        `Import CSV selesai! ${addedCount} user baru ditambahkan & diprovisioning ke Firebase Auth${updatedCount > 0 ? `, ${updatedCount} user diperbarui` : ''}${skippedCount > 0 ? `, ${skippedCount} baris duplikat username/tidak valid dilewati` : ''}, dan seluruh data telah disinkronkan ke SDM.`
+        `Import CSV selesai! ${addedCount} user baru ditambahkan & tertaut penuh ke Firebase Auth${updatedCount > 0 ? `, ${updatedCount} user diperbarui` : ''}${skippedCount > 0 ? `, ${skippedCount} baris duplikat/dilewati` : ''}, dan seluruh data tersinkron ke SDM.${authWarn}${conflictUpdateWarn}`
       );
-      setTimeout(() => setSyncNotice(null), 6000);
+      setTimeout(() => setSyncNotice(null), 8000);
     } finally {
       setIsImportingCsv(false);
     }
@@ -2259,11 +2843,18 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
             <button
               id="btn-sync-user-sdm"
               onClick={handleManualSyncSdm}
-              className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
-              title="Sinkronisasikan data pengguna dengan menu Sumber Daya Manusia (Dosen, Mahasiswa, Admin, PLP)"
+              disabled={isSyncingAuth}
+              className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-bold rounded-lg text-xs flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+              title="Sinkronisasikan data pengguna dengan menu SDM serta akun login Firebase Auth"
             >
-              <RefreshCw className="w-4 h-4 text-emerald-200" />
-              <span>Sinkronkan SDM</span>
+              <RefreshCw className={`w-4 h-4 text-emerald-200 ${isSyncingAuth ? 'animate-spin' : ''}`} />
+              <span>
+                {isSyncingAuth
+                  ? syncProgress && syncProgress.total > 0
+                    ? `Menyinkronkan (${syncProgress.processed}/${syncProgress.total})${syncProgress.waitingCooldown ? ' • Jeda...' : '...'}`
+                    : 'Menyinkronkan Auth...'
+                  : 'Sinkronkan SDM & Auth'}
+              </span>
             </button>
             <button
               id="btn-import-user-csv"
@@ -2293,6 +2884,81 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
             </div>
             <button onClick={() => setSyncNotice(null)} className="text-blue-700 hover:text-blue-900 cursor-pointer">
               <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {/* Duplicate Accounts Warning Banner + 1-Click Cleanup */}
+        {duplicateUsersInfo.duplicateGroups.length > 0 && (
+          <div
+            id="duplicate-users-warning-banner"
+            className="mt-4 p-3.5 bg-rose-50 border border-rose-300 text-rose-950 rounded-xl text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+          >
+            <div className="flex items-start gap-2.5">
+              <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p>
+                  Terdeteksi <strong>{duplicateUsersInfo.duplicateGroups.length} pengguna dengan akun ganda</strong> ({duplicateUsersInfo.removedDocIds.length} entri duplikat) pada daftar User:
+                </p>
+                <p className="text-[11px] text-rose-800">
+                  {duplicateUsersInfo.duplicateGroups
+                    .slice(0, 4)
+                    .map((g) => `${g.survivor.nama} (${g.survivor.username})`)
+                    .join(', ')}
+                  {duplicateUsersInfo.duplicateGroups.length > 4
+                    ? `, dan ${duplicateUsersInfo.duplicateGroups.length - 4} akun lainnya.`
+                    : '.'}{' '}
+                  Pembersihan hanya menggabungkan &amp; menghapus entri ganda di Manajemen User tanpa menghapus data SDM.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              id="btn-cleanup-duplicate-users"
+              onClick={handleCleanupDuplicateUsers}
+              disabled={isCleaningDuplicates || isSyncingAuth}
+              className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white rounded-lg font-bold text-[11px] flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isCleaningDuplicates ? 'animate-spin' : ''}`} />
+              <span>
+                {isCleaningDuplicates
+                  ? 'Membersihkan Akun Ganda...'
+                  : `Bersihkan ${duplicateUsersInfo.removedDocIds.length} Akun Ganda`}
+              </span>
+            </button>
+          </div>
+        )}
+
+        {/* Unlinked Firebase Auth Warning Strip */}
+        {unlinkedAuthUsersCount > 0 && (
+          <div
+            id="unlinked-auth-warning-banner"
+            className="mt-4 p-3.5 bg-amber-50 border border-amber-300 text-amber-950 rounded-xl text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+          >
+            <div className="flex items-start sm:items-center gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5 sm:mt-0" />
+              <span>
+                Terdapat <strong>{unlinkedAuthUsersCount} akun aktif</strong> yang belum tertaut ke kredensial login Firebase Authentication (NIM/NIP).
+                {conflictAuthUsersCount > 0
+                  ? ` (${conflictAuthUsersCount} akun terdeteksi sudah memakai kata sandi kustom/pribadi sehingga sengaja tidak ditimpa otomatis).`
+                  : ' Klik tombol di samping untuk menautkan akun secara otomatis agar dapat login dari PC mana pun.'}
+              </span>
+            </div>
+            <button
+              type="button"
+              id="btn-repair-unlinked-auth"
+              onClick={handleManualSyncSdm}
+              disabled={isSyncingAuth}
+              className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white rounded-lg font-bold text-[11px] flex items-center gap-1.5 shrink-0 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncingAuth ? 'animate-spin' : ''}`} />
+              <span>
+                {isSyncingAuth
+                  ? syncProgress && syncProgress.total > 0
+                    ? `Memproses ${syncProgress.processed}/${syncProgress.total}${syncProgress.waitingCooldown ? ' (jeda rate-limit...)' : '...'}`
+                    : 'Memproses...'
+                  : 'Perbaiki & Sinkronkan Semua Auth'}
+              </span>
             </button>
           </div>
         )}
@@ -2535,6 +3201,56 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
                         <td className="py-3 px-4">
                           <div className="font-mono font-semibold text-slate-800">{user.username}</div>
                           <div className="text-[11px] text-slate-500 font-mono">{user.identifier}</div>
+                          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                            {isUserAuthSynced(user) ? (
+                              <span
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9px] font-bold"
+                                title="Akun sudah tertaut ke kredensial login Firebase Authentication"
+                              >
+                                <ShieldCheck className="w-2.5 h-2.5" />
+                                <span>Auth Sinkron</span>
+                              </span>
+                            ) : (
+                              <>
+                                {authSyncIssues[user.id] === 'conflict' ? (
+                                  <span
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-orange-50 text-orange-800 border border-orange-300 text-[9px] font-bold"
+                                    title="Akun sudah ada di Firebase Auth dengan kata sandi kustom/pribadi sehingga sengaja tidak ditimpa otomatis. Pengguna login memakai sandi terakhirnya (atau hapus & buat ulang jika lupa sandi)."
+                                  >
+                                    <ShieldAlert className="w-2.5 h-2.5" />
+                                    <span>Sandi Kustom (Konflik Auth)</span>
+                                  </span>
+                                ) : authSyncIssues[user.id] === 'rate_limited' ? (
+                                  <span
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-50 text-rose-800 border border-rose-300 text-[9px] font-bold"
+                                    title="Tertahan batas kecepatan sementara (rate-limit) Firebase Authentication. Klik Sinkronkan lagi setelah beberapa detik."
+                                  >
+                                    <ShieldAlert className="w-2.5 h-2.5" />
+                                    <span>Tertunda (Rate Limit Auth)</span>
+                                  </span>
+                                ) : (
+                                  <span
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-300 text-[9px] font-bold"
+                                    title="Akun belum tertaut ke Firebase Authentication"
+                                  >
+                                    <ShieldAlert className="w-2.5 h-2.5" />
+                                    <span>Belum Sinkron Auth</span>
+                                  </span>
+                                )}
+                                {user.status === 'Aktif' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSyncSingleUserAuth(user)}
+                                    disabled={syncingSingleUserId === user.id}
+                                    className="px-1.5 py-0.5 rounded bg-[#002B49] hover:bg-[#003865] text-[#D4AF37] text-[9px] font-bold cursor-pointer disabled:opacity-50"
+                                    title="Buat & tautkan akun login Firebase Auth untuk username ini"
+                                  >
+                                    {syncingSingleUserId === user.id ? 'Menautkan...' : 'Sinkronkan'}
+                                  </button>
+                                )}
+                              </>
+                            )}
+                          </div>
                           {currentRole === 'super_admin' && user.password && (
                             <div className="text-[10px] text-slate-500 flex items-center gap-1.5 mt-1 font-mono flex-wrap">
                               <span className="text-slate-400">Pass:</span>
@@ -3119,6 +3835,13 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
+                </div>
+              )}
+
+              {!modalError && liveModalDuplicateConflict && (
+                <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-lg flex items-start gap-2 text-[11px] text-amber-900">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>{liveModalDuplicateConflict.message}</span>
                 </div>
               )}
 

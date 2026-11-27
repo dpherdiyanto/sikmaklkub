@@ -158,7 +158,11 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
         } else {
           // Strip common NIP./NIM. prefixes if user typed e.g. "NIP. 1974..." into username box
           const strippedNumericId = inputLower.replace(/^(nip|nim)\s*\.?\s*/i, '').trim();
+          const pureDigits = strippedNumericId.replace(/\D/g, '');
           pushCandidate(usernameToAuthEmail(strippedNumericId || inputLower));
+          if (pureDigits.length >= 5) {
+            pushCandidate(usernameToAuthEmail(pureDigits));
+          }
           if (strippedNumericId !== inputLower) {
             pushCandidate(usernameToAuthEmail(inputLower));
           }

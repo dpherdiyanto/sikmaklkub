@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
-import { auth, db, onAuthStateChanged, signOut, FirebaseUser } from './firebase';
+import { auth, db, onAuthStateChanged, signOut, FirebaseUser, isRealFirebaseUid } from './firebase';
 import {
   createEmptyRemoteSyncMeta,
   subscribeSikmaCollections,
@@ -28,7 +28,8 @@ import {
   syncKlkQrConfigToFirestore,
   saveStudentQrVerificationToFirestore,
   deleteStudentQrVerificationInFirestore,
-  clearAllKlkQrVerificationsInFirestore
+  clearAllKlkQrVerificationsInFirestore,
+  provisionAndLinkUsersBatch
 } from './utils/firestoreSync';
 import {
   ActiveTab,
@@ -174,6 +175,51 @@ export default function App() {
   const [usersRemoteReadyVersion, setUsersRemoteReadyVersion] = useState<number>(0);
   const hasSeededCloudRef = useRef<boolean>(false);
   const touchedSessionUidRef = useRef<string | null>(null);
+  const autoProvisionAttemptedKeysRef = useRef<Set<string>>(new Set());
+
+  const autoProvisionUnlinkedUsers = (
+    candidateUsers: UserAccountItem[],
+    fbUser: FirebaseUser | null,
+    options?: { includeAllUnlinked?: boolean }
+  ) => {
+    if (!fbUser || candidateUsers.length === 0) return;
+    const isAdmin =
+      isBootstrappedAdminEmail(fbUser.email, fbUser.emailVerified) ||
+      currentRole === 'super_admin' ||
+      currentRole === 'admin';
+    if (!isAdmin) return;
+
+    const includeAll = options?.includeAllUnlinked ?? false;
+    const unlinked = candidateUsers.filter((u) => {
+      if (u.status !== 'Aktif' || isRealFirebaseUid(u.ownerUid)) return false;
+      if (!includeAll && u.ownerUid !== 'unlinked-pending') return false;
+      const attemptKey = `${u.id}:${(u.username || '').trim().toLowerCase()}`;
+      return !autoProvisionAttemptedKeysRef.current.has(attemptKey);
+    });
+    if (unlinked.length === 0) return;
+
+    unlinked.forEach((u) => {
+      const attemptKey = `${u.id}:${(u.username || '').trim().toLowerCase()}`;
+      autoProvisionAttemptedKeysRef.current.add(attemptKey);
+    });
+
+    void provisionAndLinkUsersBatch(unlinked, fbUser, { onlyUnlinked: true })
+      .then((res) => {
+        if (res.linkedCount > 0) {
+          setUserList((prev) =>
+            prev.map((u) => {
+              const linked = res.updatedUsers.find((lu) => lu.id === u.id);
+              return linked && linked.ownerUid && linked.ownerUid !== u.ownerUid
+                ? { ...u, ownerUid: linked.ownerUid }
+                : u;
+            })
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn('Auto provision unlinked users warning:', err);
+      });
+  };
 
   const applyFromRemote = (updater: () => void) => {
     remoteApplyDepthRef.current += 1;
@@ -682,6 +728,7 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
           }
           if (!hasUsers && userList.length > 0) {
             await syncUsersListToFirestore(userList, firebaseUser, remoteMetaRef.current, false);
+            autoProvisionUnlinkedUsers(userList, firebaseUser, { includeAllUnlinked: true });
           }
           if (!hasPengumuman && pengumumanList.length > 0) {
             await syncPengumumanListToFirestore(pengumumanList, firebaseUser, remoteMetaRef.current, false, isAdminUser);
@@ -1113,6 +1160,9 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     setPembimbingLapanganList(activePembimbing);
     setKlkList(syncedKlk);
     setUserList(activeUsers);
+    if (!options?.skipReverseSdmUserCreation) {
+      autoProvisionUnlinkedUsers(activeUsers, firebaseUser);
+    }
     if (logList !== undefined) setLogbooks(nextLogbooks);
     if (semList !== undefined) setSeminarList(nextSeminar);
     if (surList !== undefined) setSuratList(nextSurat);
@@ -2030,7 +2080,8 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
                   updatedPembimbingLapanganList,
                   updatedLogbooks,
                   updatedSeminarList,
-                  updatedSuratList
+                  updatedSuratList,
+                  { skipReverseSdmUserCreation: true }
                 );
               }}
               onUpdateUserPassword={async (userId, hashedPassword) => {
