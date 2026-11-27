@@ -1803,7 +1803,7 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
     : undefined;
 
   const isGoogleAuthenticated = Boolean(
-    firebaseUser && currentUser && firebaseUser.uid === currentUser.id
+    firebaseUser?.providerData?.some((p) => p?.providerId === 'google.com')
   );
 
   const requiresPasswordChange = Boolean(
@@ -1827,7 +1827,9 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
       }
     } catch {}
 
-    const isGoogleLogin = Boolean(auth.currentUser && auth.currentUser.uid === user.id);
+    const isGoogleLogin = Boolean(
+      auth.currentUser?.providerData?.some((p) => p?.providerId === 'google.com')
+    );
     const matchedAcc = latestUsers.find(
       (u) =>
         u.id === user.id ||
@@ -2110,6 +2112,9 @@ Departemen Kimia - Fakultas Sains dan Teknologi (FSTeM) Universitas Brawijaya
                     passwordChangedAt: changedAt
                   };
                   setCurrentUser(updatedAuth);
+                  try {
+                    localStorage.setItem('sikma_auth_user', JSON.stringify(updatedAuth));
+                  } catch {}
                 }
                 setPasswordReminderNotice(null);
 
