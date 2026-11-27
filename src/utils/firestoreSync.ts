@@ -64,39 +64,65 @@ export function emailToAdminDocId(email?: string | null): string {
 }
 
 export async function syncAdminRegistryForUser(
-  user: Pick<UserAccountItem, 'email' | 'nama' | 'role' | 'status'>
+  user: Pick<UserAccountItem, 'email' | 'nama' | 'role' | 'status'> & {
+    ownerUid?: string;
+    username?: string;
+  }
 ): Promise<void> {
-  const email = clampStr(user.email || '', 200).toLowerCase();
-  if (!email || !email.includes('@')) return;
-  const adminId = emailToAdminDocId(email);
-  const adminRef = doc(db, 'admins', adminId);
-  const isPrivileged = (user.role === 'super_admin' || user.role === 'admin') && user.status !== 'Nonaktif';
+  const profileEmail = clampStr(user.email || '', 200).toLowerCase();
+  const uname = clampStr(user.username || '', 100).toLowerCase();
+  const authEmail = uname
+    ? uname === 'superadmin' || uname === ZUPER_ADMIN_EMAIL
+      ? ZUPER_ADMIN_EMAIL
+      : usernameToAuthEmail(uname)
+    : '';
+  const emailCandidates = Array.from(
+    new Set([profileEmail, authEmail].filter((e) => e && e.includes('@') && e.length >= 3))
+  );
+  const primaryEmail = authEmail || profileEmail || 'admin@sikma.ub.ac.id';
 
-  try {
-    const snap = await getDoc(adminRef);
-    if (isPrivileged) {
-      if (!snap.exists()) {
-        await setDoc(adminRef, {
-          uid: adminId,
-          email,
-          nama: clampStr(user.nama || 'Administrator SIKMA', 200),
-          role: user.role === 'super_admin' ? 'super_admin' : 'admin',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp()
-        });
-      } else {
-        await updateDoc(adminRef, {
-          email,
-          nama: clampStr(user.nama || 'Administrator SIKMA', 200),
-          role: user.role === 'super_admin' ? 'super_admin' : 'admin',
-          updatedAt: serverTimestamp()
-        });
+  const targetEntries: { adminId: string; email: string }[] = emailCandidates.map((e) => ({
+    adminId: emailToAdminDocId(e),
+    email: e
+  }));
+  if (user.ownerUid && isRealFirebaseUid(user.ownerUid)) {
+    const cleanUid = sanitizeDocId(user.ownerUid, 'adm');
+    targetEntries.push({ adminId: cleanUid, email: primaryEmail });
+  }
+  if (targetEntries.length === 0) return;
+
+  const isPrivileged = (user.role === 'super_admin' || user.role === 'admin') && user.status !== 'Nonaktif';
+  const normalizedRole = user.role === 'super_admin' ? 'super_admin' : 'admin';
+  const adminNama = clampStr(user.nama || 'Administrator SIKMA', 200);
+
+  for (const entry of targetEntries) {
+    const adminRef = doc(db, 'admins', entry.adminId);
+    try {
+      const snap = await getDoc(adminRef);
+      if (isPrivileged) {
+        if (!snap.exists()) {
+          await setDoc(adminRef, {
+            uid: entry.adminId,
+            email: entry.email,
+            nama: adminNama,
+            role: normalizedRole,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp()
+          });
+        } else {
+          await updateDoc(adminRef, {
+            email: entry.email,
+            nama: adminNama,
+            role: normalizedRole,
+            updatedAt: serverTimestamp()
+          });
+        }
+      } else if (snap.exists()) {
+        await deleteDoc(adminRef);
       }
-    } else if (snap.exists()) {
-      await deleteDoc(adminRef);
+    } catch (error) {
+      console.warn(`Sync admin registry warning (${entry.adminId}):`, error);
     }
-  } catch (error) {
-    console.warn('Sync admin registry warning:', error);
   }
 }
 
@@ -109,6 +135,132 @@ export async function removeAdminRegistryByEmail(email?: string | null): Promise
   } catch {
     // ignore if non-super-admin or doesn't exist
   }
+}
+
+export async function migrateRelatedOwnerReferences(oldUid: string, newUid: string): Promise<void> {
+  const cleanOld = sanitizeDocId(oldUid, 'usr');
+  const cleanNew = sanitizeDocId(newUid, 'usr');
+  if (!cleanOld || !cleanNew || cleanOld === cleanNew || !isRealFirebaseUid(cleanNew)) return;
+
+  const recreateWithNewOwner = async (colName: string) => {
+    try {
+      const snap = await getDocs(query(collection(db, colName), where('ownerUid', '==', cleanOld)));
+      for (const d of snap.docs) {
+        const raw = d.data();
+        const nextPayload = {
+          ...raw,
+          ownerUid: cleanNew,
+          ...(raw.data && typeof raw.data === 'object' && (raw.data as Record<string, unknown>).ownerUid === cleanOld
+            ? { data: { ...(raw.data as Record<string, unknown>), ownerUid: cleanNew } }
+            : {}),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        };
+        await deleteDoc(d.ref);
+        await setDoc(d.ref, nextPayload);
+      }
+    } catch (err) {
+      console.warn(`Migrate ownerUid warning (${colName}):`, err);
+    }
+  };
+
+  const updateFieldInCol = async (colName: string, fieldName: string) => {
+    try {
+      const snap = await getDocs(query(collection(db, colName), where(fieldName, '==', cleanOld)));
+      for (const d of snap.docs) {
+        await updateDoc(d.ref, {
+          [fieldName]: cleanNew,
+          updatedAt: serverTimestamp()
+        });
+      }
+    } catch (err) {
+      console.warn(`Migrate ${fieldName} warning (${colName}):`, err);
+    }
+  };
+
+  await Promise.all([
+    recreateWithNewOwner('klk_submissions'),
+    recreateWithNewOwner('logbooks'),
+    recreateWithNewOwner('seminars'),
+    recreateWithNewOwner('surat_pengajuan'),
+    recreateWithNewOwner('skripsi_records'),
+    recreateWithNewOwner('tesis_records'),
+    recreateWithNewOwner('sdm_private'),
+    updateFieldInCol('klk_qr_verifications', 'ownerUid'),
+    updateFieldInCol('sdm_directory', 'ownerUid'),
+    updateFieldInCol('klk_submissions', 'assignedDosenUid'),
+    updateFieldInCol('klk_submissions', 'assignedDpaUid'),
+    updateFieldInCol('klk_submissions', 'pembimbingLapanganUid'),
+    updateFieldInCol('logbooks', 'assignedDosenUid'),
+    updateFieldInCol('skripsi_records', 'assignedDosenUid'),
+    updateFieldInCol('tesis_records', 'assignedDosenUid')
+  ]);
+}
+
+export async function migrateUserDocToAuthUid(oldDocId: string, newAuthUid: string): Promise<boolean> {
+  const cleanOld = sanitizeDocId(oldDocId, 'user');
+  const cleanNew = sanitizeDocId(newAuthUid, 'user');
+  if (!cleanOld || !cleanNew || cleanOld === cleanNew || cleanOld === 'usr-000') return false;
+  const oldRef = doc(db, 'users', cleanOld);
+  const newRef = doc(db, 'users', cleanNew);
+  const oldSnap = await getDoc(oldRef);
+  if (!oldSnap.exists()) return false;
+  const data = oldSnap.data();
+  const prevOwnerUid = typeof data.ownerUid === 'string' ? data.ownerUid : '';
+  const safePayload = buildUserDocPayload(
+    {
+      id: cleanNew,
+      username: String(data.username || cleanNew),
+      nama: String(data.nama || 'Pengguna'),
+      role: normalizeMahasiswaRole(String(data.role || 'mahasiswa_s1'), String(data.unit || '')),
+      identifier: String(data.identifier || ''),
+      email: String(data.email || ''),
+      avatarText: String(data.avatarText || 'UB'),
+      unit: String(data.unit || ''),
+      jabatan: String(data.jabatan || ''),
+      status: data.status === 'Nonaktif' ? 'Nonaktif' : 'Aktif',
+      noHp: String(data.noHp || ''),
+      terakhirLogin: String(data.terakhirLogin || 'Belum pernah login'),
+      mustChangePassword: Boolean(data.mustChangePassword),
+      passwordChangedAt: data.passwordChangedAt ? String(data.passwordChangedAt) : undefined
+    },
+    cleanNew
+  );
+  const newSnap = await getDoc(newRef);
+  if (!newSnap.exists()) {
+    await setDoc(newRef, {
+      ...safePayload,
+      ownerUid: cleanNew,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  } else {
+    await updateDoc(newRef, {
+      ownerUid: cleanNew,
+      updatedAt: serverTimestamp()
+    });
+  }
+  await deleteDoc(oldRef);
+
+  // Migrate any owned or assigned records from old UID -> new UID
+  if (isRealFirebaseUid(cleanOld) && cleanOld !== cleanNew) {
+    await migrateRelatedOwnerReferences(cleanOld, cleanNew);
+  }
+  if (isRealFirebaseUid(prevOwnerUid) && prevOwnerUid !== cleanOld && prevOwnerUid !== cleanNew) {
+    await migrateRelatedOwnerReferences(prevOwnerUid, cleanNew);
+  }
+
+  if (data.role === 'admin' || data.role === 'super_admin') {
+    await syncAdminRegistryForUser({
+      email: String(data.email || ''),
+      username: String(data.username || ''),
+      ownerUid: cleanNew,
+      nama: String(data.nama || 'Administrator SIKMA'),
+      role: data.role as UserRole,
+      status: data.status === 'Nonaktif' ? 'Nonaktif' : 'Aktif'
+    });
+  }
+  return true;
 }
 
 export function sanitizeDocId(rawId: string, fallbackPrefix = 'doc'): string {
@@ -2511,10 +2663,12 @@ export async function provisionAndLinkUsersBatch(
 
     if (provRes.status === 'created' || provRes.status === 'matched' || provRes.status === 'updated') {
       const realUid = sanitizeDocId(provRes.uid, 'user');
-      const docId = sanitizeDocId(u.id, 'user');
+      const oldDocId = sanitizeDocId(u.id, 'user');
+      const targetDocId = oldDocId === 'usr-000' ? oldDocId : realUid;
 
       nextUsers[i] = {
         ...u,
+        id: targetDocId,
         ownerUid: realUid
       };
 
@@ -2522,25 +2676,38 @@ export async function provisionAndLinkUsersBatch(
       linkedCount++;
 
       try {
-        const userRef = doc(db, 'users', docId);
-        const snap = await getDoc(userRef);
-        const payload = buildUserDocPayload({ ...u, id: docId }, docId);
-        if (snap.exists()) {
-          await updateDoc(userRef, {
+        const targetRef = doc(db, 'users', targetDocId);
+        const targetSnap = await getDoc(targetRef);
+        const payload = buildUserDocPayload({ ...u, id: targetDocId }, targetDocId);
+        if (targetSnap.exists()) {
+          await updateDoc(targetRef, {
             ...payload,
             ownerUid: realUid,
             updatedAt: serverTimestamp()
           });
         } else {
-          await setDoc(userRef, {
+          await setDoc(targetRef, {
             ...payload,
             ownerUid: realUid,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp()
           });
         }
+        if (oldDocId !== targetDocId) {
+          await deleteDoc(doc(db, 'users', oldDocId)).catch(() => undefined);
+        }
+        if (u.role === 'admin' || u.role === 'super_admin') {
+          await syncAdminRegistryForUser({
+            email: u.email,
+            username: u.username,
+            ownerUid: realUid,
+            nama: u.nama,
+            role: u.role,
+            status: u.status
+          });
+        }
       } catch (err) {
-        console.warn(`Link ownerUid warning for ${docId}:`, err);
+        console.warn(`Link ownerUid warning for ${targetDocId}:`, err);
       }
     } else if (provRes.status === 'exists_different_password') {
       conflictUsernames.push(uname);

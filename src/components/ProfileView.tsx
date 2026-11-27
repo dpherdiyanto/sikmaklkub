@@ -614,23 +614,27 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const handleUpdatePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isUpdatingPassword) return;
-    if (!currentPassword) {
+    const cleanCurrentPassword = currentPassword.trim();
+    const cleanNewPassword = newPassword.trim();
+    const cleanConfirmPassword = confirmPassword.trim();
+
+    if (!cleanCurrentPassword) {
       showNotification('Masukkan kata sandi saat ini.', 'error');
       return;
     }
 
-    const validationErr = getPasswordValidationMessage(newPassword);
+    const validationErr = getPasswordValidationMessage(cleanNewPassword);
     if (validationErr) {
       showNotification(validationErr, 'error');
       return;
     }
 
-    if (newPassword === currentPassword) {
+    if (cleanNewPassword === cleanCurrentPassword) {
       showNotification('Kata sandi baru harus berbeda dari kata sandi awal/saat ini.', 'error');
       return;
     }
 
-    if (newPassword !== confirmPassword) {
+    if (cleanNewPassword !== cleanConfirmPassword) {
       showNotification('Konfirmasi kata sandi baru tidak cocok.', 'error');
       return;
     }
@@ -640,9 +644,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       const fbUser = auth.currentUser;
       if (fbUser && fbUser.email) {
         try {
-          const credential = EmailAuthProvider.credential(fbUser.email, currentPassword);
+          const credential = EmailAuthProvider.credential(fbUser.email, cleanCurrentPassword);
           await reauthenticateWithCredential(fbUser, credential);
-          await updatePassword(fbUser, newPassword);
+          await updatePassword(fbUser, cleanNewPassword);
         } catch (fbErr) {
           const code = (fbErr as { code?: string })?.code || '';
           if (
@@ -671,15 +675,15 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         }
       } else {
         const storedPass = matchedUser?.password || PREDEFINED_ACCOUNTS[currentRole]?.passwordHint || '';
-        const isCurrentValid = storedPass ? await verifyPassword(currentPassword, storedPass) : false;
+        const isCurrentValid = storedPass ? await verifyPassword(cleanCurrentPassword, storedPass) : false;
         const presetHint = PREDEFINED_ACCOUNTS[currentRole]?.passwordHint;
-        if (!isCurrentValid && currentPassword !== presetHint) {
+        if (!isCurrentValid && cleanCurrentPassword !== presetHint) {
           showNotification('Kata sandi saat ini tidak cocok dengan akun Anda.', 'error');
           return;
         }
       }
 
-      const hashed = await hashPassword(newPassword);
+      const hashed = await hashPassword(cleanNewPassword);
       const targetUserId = matchedUser?.id || currentUser?.id || '';
       if (targetUserId && onUpdateUserPassword) {
         await onUpdateUserPassword(targetUserId, hashed);

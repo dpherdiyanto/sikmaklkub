@@ -51,6 +51,7 @@ import {
   usernameToAuthEmail,
   provisionAndLinkUsersBatch,
   buildUserDocPayload,
+  migrateRelatedOwnerReferences,
   BatchAuthProvisionProgress,
   ZUPER_ADMIN_EMAIL
 } from '../utils/firestoreSync';
@@ -637,6 +638,10 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
       });
       if (summary.linkedCount > 0) {
         const linked = summary.updatedUsers[0];
+        if (linked.id !== targetUser.id) {
+          onBeforeUpsertUserId?.(linked.id);
+          onBeforeDeleteUserIds?.([targetUser.id]);
+        }
         const nextList = userList.map((u) => (u.id === targetUser.id ? linked : u));
         persistUserList(nextList);
         if (onUpdateUserList) onUpdateUserList(nextList);
@@ -1310,8 +1315,13 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         }
 
         const nextOwnerUidOnEdit = provisionedUid || (usernameChanged ? 'unlinked-pending' : '');
+        const targetDocId =
+          provisionedUid && docId !== 'usr-000' && docId !== provisionedUid
+            ? provisionedUid
+            : docId;
+        const targetUserDocRef = doc(db, 'users', targetDocId);
         const updatedPayload: Record<string, unknown> = {
-          id: docId,
+          id: targetDocId,
           ...(nextOwnerUidOnEdit ? { ownerUid: nextOwnerUidOnEdit } : {}),
           username: clampStr(finalUsername, 100),
           nama: clampStr(formData.nama, 200),
@@ -1324,29 +1334,53 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           status: normalizedStatus,
           noHp: clampStr(formData.noHp, 40),
           terakhirLogin: clampStr(editingUser.terakhirLogin || 'Belum pernah login', 120),
-          mustChangePassword: Boolean(editingUser.mustChangePassword),
+          mustChangePassword: finalPassword && !authPasswordConflict ? true : Boolean(editingUser.mustChangePassword),
+          ...(finalPassword && !authPasswordConflict ? { passwordChangedAt: '' } : {}),
           updatedAt: serverTimestamp()
         };
 
-        const existingSnap = await withFirestoreTimeout(getDoc(userDocRef));
+        if (targetDocId !== docId) {
+          onBeforeUpsertUserId?.(targetDocId);
+        }
+        const existingSnap = await withFirestoreTimeout(getDoc(targetUserDocRef));
         if (existingSnap.exists()) {
-          await withFirestoreTimeout(updateDoc(userDocRef, updatedPayload));
+          await withFirestoreTimeout(updateDoc(targetUserDocRef, updatedPayload));
         } else {
           await withFirestoreTimeout(
-            setDoc(userDocRef, {
+            setDoc(targetUserDocRef, {
               ...updatedPayload,
-              ownerUid: provisionedUid || editingUser.ownerUid || docId,
+              ownerUid: provisionedUid || editingUser.ownerUid || targetDocId,
               createdAt: serverTimestamp()
             })
           );
+        }
+        if (targetDocId !== docId) {
+          onBeforeDeleteUserIds?.([docId]);
+          await withFirestoreTimeout(deleteDoc(userDocRef)).catch(() => undefined);
+        }
+        if (provisionedUid) {
+          if (isRealFirebaseUid(docId) && docId !== provisionedUid) {
+            await withFirestoreTimeout(migrateRelatedOwnerReferences(docId, provisionedUid)).catch(() => undefined);
+          }
+          if (
+            editingUser.ownerUid &&
+            isRealFirebaseUid(editingUser.ownerUid) &&
+            editingUser.ownerUid !== docId &&
+            editingUser.ownerUid !== provisionedUid
+          ) {
+            await withFirestoreTimeout(migrateRelatedOwnerReferences(editingUser.ownerUid, provisionedUid)).catch(() => undefined);
+          }
         }
 
         if (editingUser.email && editingUser.email.toLowerCase() !== formData.email.trim().toLowerCase()) {
           await withFirestoreTimeout(removeAdminRegistryByEmail(editingUser.email)).catch(() => undefined);
         }
+        const resolvedAdminOwnerUid = provisionedUid || editingUser.ownerUid;
         await withFirestoreTimeout(
           syncAdminRegistryForUser({
             email: formData.email,
+            username: finalUsername,
+            ownerUid: resolvedAdminOwnerUid,
             nama: formData.nama,
             role: normalizedRole,
             status: normalizedStatus
@@ -1358,11 +1392,13 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           u.id === editingUser.id
             ? {
                 ...u,
+                id: targetDocId,
                 ...formData,
                 ...(nextOwnerUidOnEdit ? { ownerUid: nextOwnerUidOnEdit } : {}),
                 username: finalUsername,
                 identifier: formattedIdentifier,
                 password: hashedEditPass ? hashedEditPass : u.password,
+                ...(hashedEditPass ? { mustChangePassword: true, passwordChangedAt: undefined } : {}),
                 avatarText: getInitials(formData.nama)
               }
             : u
@@ -1370,7 +1406,7 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         persistUserList(updated);
 
         // Sinkronisasi pembaruan ke seluruh modul: SDM, KLK, Logbook Lab, Jadwal Seminar, & Permohonan Surat
-        const savedUser = updated.find((u) => u.id === editingUser.id);
+        const savedUser = updated.find((u) => u.id === targetDocId);
         if (savedUser) {
           const fullRes = syncUserEditAcrossAllModules(editingUser, savedUser, {
             dosenList,
@@ -1477,6 +1513,8 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         await withFirestoreTimeout(
           syncAdminRegistryForUser({
             email: formData.email,
+            username: finalUsername,
+            ownerUid: docId,
             nama: formData.nama,
             role: normalizedRole,
             status: normalizedStatus
@@ -1901,6 +1939,8 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
         }
         await syncAdminRegistryForUser({
           email: targetUser.email,
+          username: targetUser.username,
+          ownerUid: targetUser.ownerUid,
           nama: targetUser.nama,
           role: targetUser.role,
           status: nextStatus
@@ -2004,23 +2044,32 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
           return next;
         });
 
-        const docId = sanitizeDocId(resetPassUser.id, 'user');
-        const userRef = doc(db, 'users', docId);
-        const snap = await withFirestoreTimeout(getDoc(userRef));
-        if (snap.exists()) {
+        const oldDocId = sanitizeDocId(resetPassUser.id, 'user');
+        const targetDocId = oldDocId === 'usr-000' ? oldDocId : provisionedUid;
+        const oldUserRef = doc(db, 'users', oldDocId);
+        const targetUserRef = doc(db, 'users', targetDocId);
+
+        if (targetDocId !== oldDocId) {
+          onBeforeUpsertUserId?.(targetDocId);
+        }
+
+        const targetSnap = await withFirestoreTimeout(getDoc(targetUserRef));
+        if (targetSnap.exists()) {
           await withFirestoreTimeout(
-            updateDoc(userRef, {
+            updateDoc(targetUserRef, {
+              id: targetDocId,
               ownerUid: provisionedUid,
               mustChangePassword: true,
+              passwordChangedAt: '',
               updatedAt: serverTimestamp()
             })
           );
         } else {
           await withFirestoreTimeout(
-            setDoc(userRef, {
-              id: docId,
+            setDoc(targetUserRef, {
+              id: targetDocId,
               ownerUid: provisionedUid,
-              username: clampStr(resetPassUser.username || docId, 100),
+              username: clampStr(resetPassUser.username || targetDocId, 100),
               nama: clampStr(resetPassUser.nama || 'Pengguna', 200),
               role: normalizeMahasiswaRole(resetPassUser.role, resetPassUser.unit),
               identifier: clampStr(resetPassUser.identifier || '', 100),
@@ -2037,16 +2086,50 @@ export const UserConfigView: React.FC<UserConfigViewProps> = ({
             })
           );
         }
+
+        if (targetDocId !== oldDocId) {
+          onBeforeDeleteUserIds?.([oldDocId]);
+          await withFirestoreTimeout(deleteDoc(oldUserRef)).catch(() => undefined);
+        }
+        if (isRealFirebaseUid(oldDocId) && oldDocId !== provisionedUid) {
+          await withFirestoreTimeout(migrateRelatedOwnerReferences(oldDocId, provisionedUid)).catch(() => undefined);
+        }
+        if (
+          resetPassUser.ownerUid &&
+          isRealFirebaseUid(resetPassUser.ownerUid) &&
+          resetPassUser.ownerUid !== oldDocId &&
+          resetPassUser.ownerUid !== provisionedUid
+        ) {
+          await withFirestoreTimeout(migrateRelatedOwnerReferences(resetPassUser.ownerUid, provisionedUid)).catch(() => undefined);
+        }
+
+        if (resetPassUser.role === 'admin' || resetPassUser.role === 'super_admin') {
+          await withFirestoreTimeout(
+            syncAdminRegistryForUser({
+              email: resetPassUser.email,
+              username: resetPassUser.username,
+              ownerUid: provisionedUid,
+              nama: resetPassUser.nama,
+              role: resetPassUser.role,
+              status: resetPassUser.status
+            })
+          ).catch(() => undefined);
+        }
       } catch (err: unknown) {
         setResetPassError(`Error Firestore (Gagal Reset Password): ${formatFirestoreWriteError(err)}`);
         return;
       }
 
+      const finalResetDocId =
+        sanitizeDocId(resetPassUser.id, 'user') === 'usr-000'
+          ? sanitizeDocId(resetPassUser.id, 'user')
+          : provisionedUid;
       const hashedReset = await hashPassword(cleanNewPass);
       const updated = userList.map((u) =>
         u.id === resetPassUser.id
           ? {
               ...u,
+              ...(finalResetDocId ? { id: finalResetDocId } : {}),
               ...(provisionedUid ? { ownerUid: provisionedUid } : {}),
               password: hashedReset,
               mustChangePassword: true,
